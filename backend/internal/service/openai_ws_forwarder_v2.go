@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/egresscapture"
 	"net/http"
 	"net/url"
 	"strings"
@@ -342,7 +343,14 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		return nil, err
 	}
 
+	var payloadCapture *egresscapture.Attempt
+	if egresscapture.CaptureEnabled(ctx) {
+		payloadCapture = egresscapture.StartWebSocket(ctx, account.ID, wsURL, wsHeaders, lease.HandshakeHeaders(),
+			egresscapture.MarshalWebSocketRequest(payload))
+		defer payloadCapture.FinishWebSocket(nil)
+	}
 	if err := lease.WriteJSONWithContextTimeout(ctx, payload, s.openAIWSWriteTimeout()); err != nil {
+		payloadCapture.FinishWebSocket(err)
 		lease.MarkBroken()
 		logOpenAIWSModeInfo(
 			"write_request_fail account_id=%d conn_id=%s cause=%s payload_bytes=%d",
@@ -540,6 +548,9 @@ readLoop:
 				}
 			}
 			message, readErr = lease.ReadMessageWithContextTimeout(upstreamReadCtx, currentReadTimeout)
+			if readErr == nil {
+				payloadCapture.ReadFrame(message)
+			}
 			if readErr == nil {
 				if documents, repaired := splitOpenAIConcatenatedJSONDocuments(message); repaired {
 					logOpenAIWSModeInfo(

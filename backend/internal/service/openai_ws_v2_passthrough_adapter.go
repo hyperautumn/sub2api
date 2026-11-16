@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/egresscapture"
 	"net/http"
 	"net/url"
 	"strings"
@@ -920,6 +921,14 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	upstreamFrameConn, ok := upstreamConn.(openaiwsv2.FrameConn)
 	if !ok {
 		return errors.New("openai ws passthrough upstream connection does not support frame relay")
+	}
+	if egresscapture.CaptureEnabled(ctx) {
+		observer := &openAIWSPayloadCaptureConn{
+			FrameConn: upstreamFrameConn, requestCtx: ctx, accountID: account.ID,
+			url: wsURL, headers: headers, handshake: handshakeHeaders,
+		}
+		upstreamFrameConn = observer
+		defer observer.finish(nil)
 	}
 	relayUpstreamFrameConn := &openAIWSPassthroughFirstOutputFrameConn{
 		inner:             upstreamFrameConn,

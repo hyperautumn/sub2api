@@ -1016,6 +1016,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_NoAvailableErrorReports
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrNoAvailableAccounts)
+	require.ErrorIs(t, err, ErrAccountSelectionRateLimited)
 	require.Nil(t, selection)
 	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
 	require.EqualError(t, err, "no available OpenAI accounts supporting model: gpt-5.4-mini (pool=1, filtered: quota_auto_pause_7d=1)")

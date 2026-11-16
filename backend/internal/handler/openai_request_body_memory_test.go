@@ -20,9 +20,9 @@ func TestOpenAIForwardRequestBodyMemoryOverloadReturns503(t *testing.T) {
 
 	require.True(t, h.handleForwardRequestBodyMemoryOverload(c, err, false))
 	require.True(t, c.IsAborted())
-	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
 	require.Equal(t, "1", recorder.Result().Header.Get("Retry-After"))
-	require.Equal(t, "service_unavailable", gjson.GetBytes(recorder.Body.Bytes(), "error.type").String())
+	require.Equal(t, "rate_limit_error", gjson.GetBytes(recorder.Body.Bytes(), "error.type").String())
 	require.Contains(t, gjson.GetBytes(recorder.Body.Bytes(), "error.message").String(), "retry later")
 }
 
@@ -43,7 +43,7 @@ func TestOpenAIForwardRequestBodyMemoryOverloadTerminatesCommittedStream(t *test
 	require.NotContains(t, recorder.Body.String(), "response.completed")
 	streamError, ok := service.GetOpsStreamError(c)
 	require.True(t, ok)
-	require.Equal(t, http.StatusServiceUnavailable, streamError.IntendedStatus)
+	require.Equal(t, http.StatusTooManyRequests, streamError.IntendedStatus)
 }
 
 func TestOpenAIForwardRequestBodyMemoryOverloadLeavesOtherErrorsUntouched(t *testing.T) {

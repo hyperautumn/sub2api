@@ -706,7 +706,7 @@ func TestAPIKeyAuthMarksOnlyExpectedIngressRejections(t *testing.T) {
 			path:       "/t",
 			key:        "valid-shape",
 			repoErr:    service.ErrAPIKeyAuthOverloaded,
-			wantStatus: http.StatusServiceUnavailable,
+			wantStatus: http.StatusTooManyRequests,
 			wantCode:   "API_KEY_AUTH_OVERLOADED",
 			wantReason: IngressRejectAPIKeyAuthOverloaded,
 		},

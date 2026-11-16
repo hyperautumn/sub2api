@@ -109,6 +109,8 @@ func AnthropicErrorWriter(c *gin.Context, status int, message string) {
 		errorType = "not_found_error"
 	case http.StatusForbidden:
 		errorType = "permission_error"
+	case http.StatusTooManyRequests:
+		errorType = "rate_limit_error"
 	}
 	c.JSON(status, gin.H{
 		"type":  "error",
@@ -127,8 +129,12 @@ func GoogleErrorWriter(c *gin.Context, status int, message string) {
 	})
 }
 
-// OpenAIErrorWriter 按 OpenAI API 规范输出模型级错误（model_not_found）。
+// OpenAIErrorWriter writes OpenAI-compatible model errors and admission limits.
 func OpenAIErrorWriter(c *gin.Context, status int, message string) {
+	if status == http.StatusTooManyRequests {
+		c.JSON(status, gin.H{"error": gin.H{"message": message, "type": "rate_limit_error", "code": "rate_limit_exceeded"}})
+		return
+	}
 	c.JSON(status, gin.H{
 		"error": gin.H{
 			"message": message,

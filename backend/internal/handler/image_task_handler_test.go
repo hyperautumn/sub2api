@@ -185,7 +185,7 @@ func TestAsyncImageHandlerSubmitRejectsWhenBodyCannotBeRetained(t *testing.T) {
 		chargeRequest bool
 		want          int
 	}{
-		{name: "budget held by other requests", want: http.StatusServiceUnavailable},
+		{name: "budget held by other requests", want: http.StatusTooManyRequests},
 		{name: "body already charged to the request", chargeRequest: true, want: http.StatusAccepted},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

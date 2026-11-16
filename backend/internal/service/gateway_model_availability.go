@@ -9,8 +9,7 @@ import (
 
 // ModelAvailabilityDiagnosis describes whether the requested model can be
 // served by any persistently eligible account in the group (active with its
-// schedulable setting enabled), ignoring transient state such as rate limits,
-// overload, temporary unschedulability, and runtime blocks. Handlers use this
+// schedulable setting enabled), with active account-wide rate limits reported separately from model support. Handlers use this
 // on the "no available accounts" error path to distinguish 404
 // model_not_found from 503 service_unavailable.
 type ModelAvailabilityDiagnosis struct {
@@ -21,6 +20,9 @@ type ModelAvailabilityDiagnosis struct {
 	// HasModelSupport is true if at least one account's model mapping admits
 	// the requested model.
 	HasModelSupport bool
+	// AllModelAccountsRateLimited is true when every configured account that
+	// supports the model has an active account-wide rate-limit reset time.
+	AllModelAccountsRateLimited bool
 	// HasRetiredSubscriptionModel records a ChatGPT upstream blocked by model
 	// retirement, so an unsupported request can include migration guidance.
 	HasRetiredSubscriptionModel bool
@@ -107,7 +109,11 @@ func (s *GatewayService) DiagnoseModelAvailabilityForPlatform(
 		diag.HasAccountsInPool = true
 		if s.isModelSupportedByAccountWithContext(ctx, &accounts[i], requestedModel) {
 			diag.HasModelSupport = true
-			return diag
+			if !accounts[i].IsRateLimited() {
+				diag.AllModelAccountsRateLimited = false
+				return diag
+			}
+			diag.AllModelAccountsRateLimited = true
 		}
 	}
 	return diag

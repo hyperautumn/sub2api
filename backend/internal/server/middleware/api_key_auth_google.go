@@ -3,6 +3,7 @@ package middleware
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -69,7 +70,8 @@ func APIKeyAuthWithSubscriptionGoogle(apiKeyService *service.APIKeyService, subs
 			}
 			if errors.Is(err, service.ErrAPIKeyAuthOverloaded) {
 				MarkIngressRejected(c, IngressRejectAPIKeyAuthOverloaded)
-				abortWithGoogleError(c, 503, "API key authentication is temporarily unavailable")
+				c.Header("Retry-After", "1")
+				abortWithGoogleError(c, http.StatusTooManyRequests, "Too many concurrent API key lookups. Please retry later.")
 				return
 			}
 			if abortIfAPIKeyLookupClientGone(c, err) {

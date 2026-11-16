@@ -2155,7 +2155,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 	if selected == nil {
 		stats := s.logDetailedSelectionFailure(ctx, groupID, sessionHash, requestedModel, platform, accounts, excludedIDs, false)
 		if requestedModel != "" {
-			return nil, fmt.Errorf("%w supporting model: %s (%s)", ErrNoAvailableAccounts, requestedModel, summarizeSelectionFailureStats(stats))
+			return nil, gatewaySelectionFailureError(requestedModel, stats)
 		}
 		return nil, ErrNoAvailableAccounts
 	}
@@ -2422,7 +2422,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 	if selected == nil {
 		stats := s.logDetailedSelectionFailure(ctx, groupID, sessionHash, requestedModel, nativePlatform, accounts, excludedIDs, true)
 		if requestedModel != "" {
-			return nil, fmt.Errorf("%w supporting model: %s (%s)", ErrNoAvailableAccounts, requestedModel, summarizeSelectionFailureStats(stats))
+			return nil, gatewaySelectionFailureError(requestedModel, stats)
 		}
 		return nil, ErrNoAvailableAccounts
 	}
@@ -2605,6 +2605,14 @@ func appendSelectionFailureRateSample(samples []string, accountID int64, remaini
 		return samples
 	}
 	return append(samples, fmt.Sprintf("%d(%s)", accountID, remaining))
+}
+
+func gatewaySelectionFailureError(requestedModel string, stats selectionFailureStats) error {
+	err := fmt.Errorf("%w supporting model: %s (%s)", ErrNoAvailableAccounts, requestedModel, summarizeSelectionFailureStats(stats))
+	if stats.ModelRateLimited > 0 {
+		return accountSelectionRateLimitError{err}
+	}
+	return err
 }
 
 func summarizeSelectionFailureStats(stats selectionFailureStats) string {

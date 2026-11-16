@@ -68,7 +68,8 @@ func TestGoogleAPIKeyAuthMarksLookupBulkheadRejection(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1beta/models", nil)
 	req.Header.Set("x-goog-api-key", "valid-shape")
 	r.ServeHTTP(w, req)
-	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+	require.Equal(t, "1", w.Header().Get("Retry-After"))
 	require.True(t, rejected)
 	require.Equal(t, IngressRejectAPIKeyAuthOverloaded, reason)
 }

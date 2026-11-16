@@ -32,7 +32,7 @@ func RejectRequestBodyMemoryOverload(c *gin.Context, err error) bool {
 		return false
 	}
 	c.Header("Retry-After", "1")
-	groupModelAllowlistErrorWriter(c)(c, http.StatusServiceUnavailable, "Request body buffering capacity is exhausted; retry later")
+	groupModelAllowlistErrorWriter(c)(c, http.StatusTooManyRequests, "Request body buffering capacity is exhausted; retry later")
 	c.Abort()
 	return true
 }

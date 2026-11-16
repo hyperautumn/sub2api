@@ -49,7 +49,7 @@ func TestGrokVoiceRequestBodyMemoryOverload(t *testing.T) {
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, req)
 
-			require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+			require.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
 			require.Equal(t, "1", rec.Header().Get("Retry-After"))
 			require.Contains(t, rec.Body.String(), "Request body buffering capacity is exhausted")
 		})

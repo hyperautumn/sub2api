@@ -113,7 +113,8 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 			}
 			if errors.Is(err, service.ErrAPIKeyAuthOverloaded) {
 				MarkIngressRejected(c, IngressRejectAPIKeyAuthOverloaded)
-				AbortWithError(c, http.StatusServiceUnavailable, "API_KEY_AUTH_OVERLOADED", "API key authentication is temporarily unavailable")
+				c.Header("Retry-After", "1")
+				AbortWithError(c, http.StatusTooManyRequests, "API_KEY_AUTH_OVERLOADED", "Too many concurrent API key lookups. Please retry later.")
 				return
 			}
 			if abortIfAPIKeyLookupClientGone(c, err) {

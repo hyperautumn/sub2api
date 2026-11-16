@@ -65,7 +65,11 @@ func (s *OpenAIGatewayService) DiagnoseModelAvailabilityForPlatform(
 		// mapping must match.
 		if accounts[i].IsModelSupported(requestedModel) {
 			diag.HasModelSupport = true
-			return diag
+			if !accounts[i].IsRateLimited() {
+				diag.AllModelAccountsRateLimited = false
+				return diag
+			}
+			diag.AllModelAccountsRateLimited = true
 		}
 	}
 	return diag

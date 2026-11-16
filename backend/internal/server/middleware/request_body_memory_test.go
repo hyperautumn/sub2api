@@ -51,7 +51,8 @@ func TestRequestBodyMemoryRejectsOverloadAndReleasesAfterHandler(t *testing.T) {
 		t.Fatal("first request did not reach handler")
 	}
 	w := request("/v1/responses")
-	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+	require.Contains(t, w.Body.String(), "rate_limit_error")
 	require.Equal(t, "1", w.Header().Get("Retry-After"))
 	releaseHeld()
 	select {

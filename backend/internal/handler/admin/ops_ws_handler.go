@@ -341,7 +341,7 @@ func (h *OpsHandler) QPSWSHandler(c *gin.Context) {
 	// Reserve a global slot before upgrading the connection to keep the limit strict.
 	if !tryAcquireOpsWSTotalSlot(opsWSLimits.MaxConns) {
 		logger.LegacyPrintf("handler.admin.ops_ws", "[OpsWS] connection limit reached: %d/%d", wsConnCount.Load(), opsWSLimits.MaxConns)
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "too many connections"})
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many connections"})
 		return
 	}
 	defer func() {
@@ -353,7 +353,7 @@ func (h *OpsHandler) QPSWSHandler(c *gin.Context) {
 	if opsWSLimits.MaxConnsPerIP > 0 && clientIP != "" {
 		if !tryAcquireOpsWSIPSlot(clientIP, opsWSLimits.MaxConnsPerIP) {
 			logger.LegacyPrintf("handler.admin.ops_ws", "[OpsWS] per-ip connection limit reached: ip=%s limit=%d", clientIP, opsWSLimits.MaxConnsPerIP)
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "too many connections"})
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many connections"})
 			return
 		}
 		defer releaseOpsWSIPSlot(clientIP)

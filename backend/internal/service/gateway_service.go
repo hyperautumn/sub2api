@@ -422,6 +422,18 @@ var (
 // ErrNoAvailableAccounts 表示没有可用的账号
 var ErrNoAvailableAccounts = errors.New("no available accounts")
 
+// ErrAccountSelectionRateLimited identifies a selection failure caused by
+// a temporary upstream account or model limit.
+var ErrAccountSelectionRateLimited = errors.New("account selection rate limited")
+
+type accountSelectionRateLimitError struct{ error }
+
+func (e accountSelectionRateLimitError) Is(target error) bool {
+	return target == ErrAccountSelectionRateLimited
+}
+
+func (e accountSelectionRateLimitError) Unwrap() error { return e.error }
+
 // ErrClaudeCodeOnly 表示分组仅允许 Claude Code 客户端访问
 var ErrClaudeCodeOnly = errors.New("this group only allows Claude Code clients")
 

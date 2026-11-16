@@ -187,6 +187,7 @@ func TestDiagnoseModelAvailabilityForPlatform_RateLimitedSupportingAccountRemain
 
 	require.True(t, diag.HasAccountsInPool)
 	require.True(t, diag.HasModelSupport, "a configured model remains supported while every matching account is temporarily cooling down")
+	require.True(t, diag.AllModelAccountsRateLimited)
 }
 
 func TestOpenAIDiagnoseModelAvailabilityForPlatform_RateLimitedSupportingAccountRemainsConfigured(t *testing.T) {
@@ -221,6 +222,7 @@ func TestOpenAIDiagnoseModelAvailabilityForPlatform_RateLimitedSupportingAccount
 
 	require.True(t, diag.HasAccountsInPool)
 	require.True(t, diag.HasModelSupport, "OpenAI-compatible diagnosis must keep transiently limited supporting accounts in the configured pool")
+	require.True(t, diag.AllModelAccountsRateLimited)
 }
 
 func TestDiagnoseModelAvailabilityForPlatform_WrongPlatformFiltersOut(t *testing.T) {

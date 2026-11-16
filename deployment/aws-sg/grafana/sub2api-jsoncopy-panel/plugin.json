@@ -1,0 +1,15 @@
+{
+  "type": "panel",
+  "name": "Sub2API JSON",
+  "id": "sub2api-jsoncopy-panel",
+  "info": {
+    "author": { "name": "Sub2API" },
+    "description": "Formatted Sub2API payloads with a copy button for each upstream attempt.",
+    "version": "1.0.0",
+    "updated": "2026-11-16"
+  },
+  "dependencies": {
+    "grafanaDependency": ">=13.0.0",
+    "plugins": []
+  }
+}

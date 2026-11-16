@@ -1,0 +1,11 @@
+services:
+  sub2api:
+    environment:
+      SUB2API_EGRESS_CAPTURE_API_KEY_ID: "${SUB2API_EGRESS_CAPTURE_API_KEY_ID:?set the dedicated test key ID}"
+    volumes:
+      - type: bind
+        source: "${SUB2API_EGRESS_CAPTURE_BINARY:?set the verified capture build path}"
+        target: /app/sub2api
+        read_only: true
+        bind:
+          create_host_path: false

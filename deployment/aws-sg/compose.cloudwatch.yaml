@@ -1,0 +1,10 @@
+services:
+  sub2api:
+    logging: !override
+      driver: awslogs
+      options:
+        awslogs-region: "${DEPLOY_REGION:?set the AWS region}"
+        awslogs-group: "${APP_LOG_GROUP:?set the CloudWatch log group}"
+        awslogs-stream: "${APP_NODE_NAME:?set the application node name}/sub2api"
+        mode: non-blocking
+        max-buffer-size: 4m

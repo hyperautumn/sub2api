@@ -1,0 +1,106 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Private Grafana for Sub2API on an independent ARM instance
+Parameters:
+  AmiId: {Type: 'AWS::EC2::Image::Id'}
+  Vpc: {Type: 'AWS::EC2::VPC::Id'}
+  PrivateSubnet: {Type: 'AWS::EC2::Subnet::Id'}
+  DatabaseGroup: {Type: 'AWS::EC2::SecurityGroup::Id'}
+  AppLogGroup: {Type: String, Default: /sub2api/sub2api-sg/app}
+  AdminPasswordParameter: {Type: String, Default: /sub2api/grafana/admin-password}
+  ReaderPasswordParameter: {Type: String, Default: /sub2api/grafana/reader-password}
+Resources:
+  GrafanaGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Grafana via the local Systems Manager tunnel
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0}
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          DestinationSecurityGroupId: !Ref DatabaseGroup
+  DatabaseIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DatabaseGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref GrafanaGroup
+      Description: Grafana monitoring PostgreSQL reader
+  GrafanaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
+      Policies:
+        - PolicyName: GrafanaMonitoring
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [cloudwatch:ListMetrics, cloudwatch:GetMetricData, cloudwatch:GetInsightRuleReport, cloudwatch:DescribeAlarms]
+                Resource: '*'
+              - Effect: Allow
+                Action: [logs:DescribeLogGroups, logs:ListLogGroups, logs:ListAggregateLogGroupSummaries, logs:GetQueryResults, logs:StopQuery]
+                Resource: '*'
+              - Effect: Allow
+                Action: [logs:StartQuery, logs:GetLogGroupFields, logs:DescribeLogStreams, logs:GetLogEvents, logs:FilterLogEvents, logs:GetLogRecord]
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${AppLogGroup}'
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${AppLogGroup}:*'
+                Condition: {StringEquals: {'aws:RequestedRegion': !Ref 'AWS::Region'}}
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AdminPasswordParameter}'
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ReaderPasswordParameter}'
+              - Effect: Deny
+                Action: [ssm:GetParameter, ssm:GetParameters, ssm:GetParametersByPath]
+                NotResource:
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AdminPasswordParameter}'
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ReaderPasswordParameter}'
+  GrafanaProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref GrafanaRole]
+  GrafanaLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+        CreditSpecification: {CpuCredits: standard}
+  GrafanaInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t4g.small
+      LaunchTemplate:
+        LaunchTemplateId: !Ref GrafanaLaunchTemplate
+        Version: !GetAtt GrafanaLaunchTemplate.LatestVersionNumber
+      IamInstanceProfile: !Ref GrafanaProfile
+      NetworkInterfaces:
+        - DeviceIndex: '0'
+          AssociatePublicIpAddress: false
+          DeleteOnTermination: true
+          GroupSet: [!Ref GrafanaGroup]
+          SubnetId: !Ref PrivateSubnet
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs: {VolumeSize: 20, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true}
+      Tags:
+        - {Key: Name, Value: sub2api-grafana}
+        - {Key: Service, Value: Grafana}
+Outputs:
+  InstanceId: {Value: !Ref GrafanaInstance}
+  AdminParameter: {Value: !Ref AdminPasswordParameter}

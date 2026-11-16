@@ -1,0 +1,33 @@
+services:
+  sub2api:
+    image: "${SUB2API_IMAGE:?set SUB2API_IMAGE to the release digest}"
+    ports: !override
+      - "${BIND_HOST:?set the EC2 private IPv4 address}:8080:8080"
+      - "127.0.0.1:18080:8080"
+    volumes:
+      - type: bind
+        source: ./rds-ap-southeast-1.pem
+        target: /etc/ssl/certs/sub2api-rds.pem
+        read_only: true
+        bind:
+          create_host_path: false
+    environment:
+      AUTO_SETUP: "${AUTO_SETUP:?set the node bootstrap mode}"
+      SKIP_SETUP: "${SKIP_SETUP:?set the node setup bypass mode}"
+      DATABASE_SSLMODE: verify-full
+      PGSSLROOTCERT: /etc/ssl/certs/sub2api-rds.pem
+      REDIS_ENABLE_TLS: "true"
+      REDIS_PASSWORD: "${REDIS_PASSWORD:?set the ElastiCache AUTH token}"
+      JWT_SECRET: "${JWT_SECRET:?set the shared JWT secret}"
+      TOTP_ENCRYPTION_KEY: "${TOTP_ENCRYPTION_KEY:?set the shared TOTP key}"
+      SERVER_TRUSTED_PROXIES: "${SERVER_TRUSTED_PROXIES:?set the ALB public subnet CIDRs}"
+      SECURITY_TRUST_FORWARDED_IP_FOR_API_KEY_ACL: "false"
+      SECURITY_URL_ALLOWLIST_ENABLED: "true"
+      SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP: "false"
+      SECURITY_URL_ALLOWLIST_ALLOW_PRIVATE_HOSTS: "false"
+      SECURITY_URL_ALLOWLIST_UPSTREAM_HOSTS: "${SECURITY_URL_ALLOWLIST_UPSTREAM_HOSTS:-}"
+    logging:
+      driver: json-file
+      options:
+        max-size: "25m"
+        max-file: "5"

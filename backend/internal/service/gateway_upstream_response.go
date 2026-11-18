@@ -706,7 +706,7 @@ func partialStreamUsageResult(c *gin.Context, resp *http.Response, streamResult 
 	}
 }
 
-func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, startTime time.Time, originalModel, mappedModel string, mimicClaudeCode bool) (*streamingResult, error) {
+func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, startTime time.Time, originalModel, mappedModel string, mimicClaudeCode bool) (_ *streamingResult, err error) {
 	observer := upstreamResponseModelObserverFromContext(c)
 	if observer == nil {
 		observer = beginUpstreamResponseModelObservation(c)
@@ -733,6 +733,10 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return nil, errors.New("streaming not supported")
+	}
+	trace := startAnthropicSSETrace(c, account, startTime, resp.StatusCode)
+	if trace != nil {
+		defer func() { trace.finishGateway(err) }()
 	}
 
 	usage := &ClaudeUsage{}
@@ -772,9 +776,16 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 	go func(scanBuf *sseScannerBuf64K) {
 		defer putSSEScannerBuf64K(scanBuf)
 		defer close(events)
+		if trace != nil {
+			defer func() { trace.finishScan(scanner.Err()) }()
+		}
 		for scanner.Scan() {
 			atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
-			if !sendEvent(scanEvent{line: scanner.Text()}) {
+			line := scanner.Text()
+			if trace != nil {
+				trace.observeLine(line)
+			}
+			if !sendEvent(scanEvent{line: line}) {
 				return
 			}
 		}

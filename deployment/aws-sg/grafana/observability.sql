@@ -10,8 +10,9 @@ SELECT CASE
   WHEN agent ~* 'codex[_ /-]+(cli|tui)|codex-cli-rs' THEN 'Codex CLI'
   WHEN agent ~* 'codex[_ /-]+(vscode|ide)' THEN 'Codex IDE'
   WHEN agent ~* '(^|[^a-z0-9])codex([^a-z0-9]|$)' THEN 'Codex'
-  WHEN agent ~* 'claude[ /_-]+code|claude-cli' THEN 'Claude Code'
-  WHEN agent ~* 'claude[ /_-]+desktop' THEN 'Claude Desktop'
+  WHEN agent ~* 'claude[ /_-]+(code|desktop)|claude-cli'
+    OR (agent ~* '(^|[[:space:]])claude/[0-9]' AND agent ~* '(^|[[:space:]])electron/[0-9]')
+    THEN 'Claude Code'
   WHEN agent ~* 'opencode' THEN 'OpenCode'
   WHEN agent ~* 'cursor' THEN 'Cursor'
   WHEN agent ~* 'windsurf|codeium' THEN 'Windsurf'
@@ -86,7 +87,7 @@ WITH records AS (
     nullif(e.request_id, '')::text, nullif(e.client_request_id, '')::text, null::text, e.account_id, e.group_id, e.api_key_id,
     coalesce(nullif(e.model, ''), nullif(e.requested_model, ''))::text,
     coalesce(nullif(e.requested_model, ''), nullif(e.model, ''))::text, nullif(e.upstream_model, '')::text, null::text,
-    coalesce(nullif(e.inbound_endpoint, ''), e.request_path)::text, e.upstream_endpoint::text, e.user_agent,
+    coalesce(nullif(e.request_path, ''), nullif(e.inbound_endpoint, ''))::text, e.upstream_endpoint::text, e.user_agent,
     null::text, null::text, e.stream, e.request_type,
     e.status_code, e.upstream_status_code, e.error_phase::text, e.error_type::text, e.provider_error_code::text, e.network_error_type::text,
     left(e.error_message, 480), e.is_business_limited,
@@ -149,16 +150,31 @@ LEFT JOIN LATERAL (
 WHERE a.endpoint ~ '^/(v1(beta)?/|anthropic/|openai/|gemini/)';
 
 CREATE OR REPLACE VIEW grafana_sub2api.traffic_records AS
-SELECT created_at, outcome, account_id, group_id, api_key_id, account_label, group_label, key_label,
-       model, app, gateway_status, upstream_status, provider_error, error_type, ttft_ms, tpot_ms, e2e_ms,
-       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
-FROM grafana_sub2api.request_records
-UNION ALL
-SELECT created_at, CASE WHEN gateway_status >= 400 THEN '失败' ELSE '仅访问日志' END,
-       account_id, group_id, api_key_id, account_label, group_label, key_label, model, app,
-       gateway_status, upstream_status, provider_error, 'HTTP 访问日志', null::bigint, null::double precision, e2e_ms,
-       null::integer, null::integer, null::integer, null::integer
-FROM grafana_sub2api.access_records WHERE NOT matched;
+WITH traffic AS (
+  SELECT created_at, outcome, account_id, group_id, api_key_id, account_label, group_label, key_label,
+         model, app, gateway_status, upstream_status, provider_error, error_type, ttft_ms, tpot_ms, e2e_ms,
+         input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, endpoint, method
+  FROM grafana_sub2api.request_records
+  UNION ALL
+  SELECT created_at, CASE WHEN gateway_status >= 400 THEN '失败' ELSE '仅访问日志' END,
+         account_id, group_id, api_key_id, account_label, group_label, key_label, model, app,
+         gateway_status, upstream_status, provider_error, 'HTTP 访问日志', null::bigint, null::double precision, e2e_ms,
+         null::integer, null::integer, null::integer, null::integer, endpoint, method
+  FROM grafana_sub2api.access_records WHERE NOT matched
+)
+SELECT traffic.*,
+       CASE
+         WHEN method = 'OPTIONS' THEN 'other'
+         WHEN endpoint ~* '(/count_tokens|/responses/input_tokens|:countTokens)/?$' THEN 'count_tokens'
+         WHEN endpoint ~* '/models(/[^/:]+)?/?$'
+           AND (method IN ('GET', 'HEAD') OR (method IS NULL AND outcome <> '成功')) THEN 'models'
+         WHEN outcome = '成功' THEN 'model'
+         WHEN endpoint ~* '/(messages|chat/completions|responses(/compact)?|completions|embeddings|systemone|images/(generations|edits)(/async)?|videos(/(generations|edits|extensions))?|live|realtime|tts|stt)/?$'
+           OR endpoint ~* ':(generateContent|streamGenerateContent|embedContent|batchEmbedContents)/?$'
+           THEN 'model'
+         ELSE 'other'
+       END AS request_kind
+FROM traffic;
 
 CREATE OR REPLACE VIEW grafana_sub2api.egress_records AS
 WITH attempts AS (

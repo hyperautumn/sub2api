@@ -2224,11 +2224,12 @@ func classifyOpsErrorLog(c *gin.Context, errType, message, code string, status i
 	phase = classifyOpsPhase(errType, message, code)
 	if service.IsOpsRequestScopedError(c) {
 		// 失败由请求内容决定：只按错误类型分类，上游错误上下文不参与归因。
-		isBusinessLimited = classifyOpsIsBusinessLimited(errType, phase, code, status, message)
+		isBusinessLimited = status < 500 && classifyOpsIsBusinessLimited(errType, phase, code, status, message)
 		return phase, isBusinessLimited, classifyOpsErrorOwner(phase, message), classifyOpsErrorSource(phase, message)
 	}
 	routingCapacityLimited := isOpsRoutingCapacityLimited(c)
 	clientBusinessLimited := service.HasOpsClientBusinessLimited(c)
+	upstreamBusinessRejection := clientBusinessLimited && service.OpsClientBusinessLimitedReason(c) == service.OpsClientBusinessLimitedReasonUpstreamRejection
 	localModelConfiguration := clientBusinessLimited && service.OpsClientBusinessLimitedReason(c) == service.OpsClientBusinessLimitedReasonLocalModelConfiguration
 	// 分组模型白名单的入口拒绝发生在调度之前（本地面请求策略，业务限流原因与
 	// 账号模型映射复用 local_model_configuration）：保持 classifyOpsPhase 的
@@ -2257,7 +2258,8 @@ func classifyOpsErrorLog(c *gin.Context, errType, message, code string, status i
 	effectiveUpstreamError := upstreamError && !localModelConfiguration
 	localClientAuthError := !effectiveUpstreamError && phase == "auth" && isOpsClientAuthError(code, msg)
 	localBusinessLimited := !effectiveUpstreamError && classifyOpsIsBusinessLimited(errType, phase, code, status, message, localClientAuthError)
-	isBusinessLimited = localModelConfiguration || routingCapacityLimited || (clientBusinessLimited && !effectiveUpstreamError) || localBusinessLimited
+	isBusinessLimited = status < 500 && (localModelConfiguration || routingCapacityLimited ||
+		upstreamBusinessRejection || (clientBusinessLimited && !effectiveUpstreamError) || localBusinessLimited)
 	errorOwner = classifyOpsErrorOwner(phase, message)
 	errorSource = classifyOpsErrorSource(phase, message)
 	return phase, isBusinessLimited, errorOwner, errorSource

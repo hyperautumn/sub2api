@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -353,6 +354,7 @@ func TestBatchImagePublicService_Submit(t *testing.T) {
 
 		_, err := svc.Submit(ctx, testBatchImageOwner(), validBatchImageSubmitRequest(), "")
 		require.ErrorIs(t, err, ErrBatchImageInsufficientBalance)
+		require.Equal(t, http.StatusForbidden, infraerrors.Code(err))
 		require.Empty(t, queue.enqueued)
 		require.Empty(t, gemini.submits)
 		require.Len(t, billing.reserves, 1)

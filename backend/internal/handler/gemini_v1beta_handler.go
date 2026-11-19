@@ -395,7 +395,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, modelName)
 	reqModel := modelName // 保存映射前的原始模型名
 	if action != "countTokens" && geminiImageGenerationRejected(c, apiKey, body, urlModel, reqModel, channelMapping.MappedModel) {
-		googleError(c, http.StatusBadRequest, service.ImageGenerationPermissionMessage())
+		googleError(c, http.StatusForbidden, service.ImageGenerationPermissionMessage())
 		return
 	}
 
@@ -624,11 +624,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				if !cls.ModelNotFound {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				}
-				message := cls.Message
-				if !cls.ModelNotFound {
-					message = "No available Gemini accounts: " + err.Error()
-				}
-				googleError(c, cls.Status, message)
+				googleErrorWithType(c, cls.Status, cls.ErrType, cls.Code, cls.Message)
 				return
 			}
 			action := fs.HandleSelectionExhausted(c.Request.Context())
@@ -641,7 +637,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				failoverClientGone(c)
 				return
 			default: // FailoverExhausted
-				h.handleGeminiFailoverExhausted(c, fs.LastFailoverErr)
+				h.handleGeminiFailoverExhausted(c, fs.TerminalError())
 				return
 			}
 		}
@@ -789,7 +785,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 						h.handleGeminiCachedContentFailoverExhausted(c, fs.LastFailoverErr)
 						return
 					}
-					h.handleGeminiFailoverExhausted(c, fs.LastFailoverErr)
+					h.handleGeminiFailoverExhausted(c, fs.TerminalError())
 					return
 				case FailoverCanceled:
 					failoverClientGone(c)
@@ -890,6 +886,17 @@ func parseGeminiModelAction(rest string) (model string, action string, err error
 func (h *GatewayHandler) handleGeminiFailoverExhausted(c *gin.Context, failoverErr *service.UpstreamFailoverError) {
 	if failoverErr == nil {
 		googleError(c, http.StatusBadGateway, "Upstream request failed")
+		return
+	}
+
+	if business, ok := failoverErr.BusinessError(); ok {
+		markUpstreamBusinessError(c, failoverErr, business)
+		googleErrorWithType(c, business.Status, business.Type, business.Code, business.Message)
+		return
+	}
+	if failoverErr.IsCredentialFailure() {
+		status, message := credentialFailoverClientResponse(failoverErr)
+		googlePlatformError(c, status, message)
 		return
 	}
 

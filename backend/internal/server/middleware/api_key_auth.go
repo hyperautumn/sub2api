@@ -10,6 +10,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/egresscapture"
+	pkgerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -135,7 +136,7 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 			apiKey.Status != service.StatusAPIKeyExpired &&
 			apiKey.Status != service.StatusAPIKeyQuotaExhausted {
 			MarkIngressRejected(c, IngressRejectAPIKeyDisabled)
-			AbortWithError(c, 401, "API_KEY_DISABLED", "API key is disabled")
+			AbortWithError(c, http.StatusForbidden, "API_KEY_DISABLED", "API key is disabled")
 			return
 		}
 
@@ -164,7 +165,7 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 		// 检查用户状态
 		if !apiKey.User.IsActive() {
 			MarkIngressRejected(c, IngressRejectUserInactive)
-			AbortWithError(c, 401, "USER_INACTIVE", "User account is not active")
+			AbortWithError(c, http.StatusForbidden, "USER_INACTIVE", "User account is not active")
 			return
 		}
 		if abortIfAPIKeyGroupUnavailable(c, apiKey) {
@@ -213,7 +214,8 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 			)
 			if subErr != nil {
 				if !skipBilling {
-					AbortWithError(c, 403, "SUBSCRIPTION_NOT_FOUND", "No active subscription found for this group")
+					status, code, message := subscriptionLookupFailure(subErr)
+					AbortWithError(c, status, code, message)
 					return
 				}
 				// skipBilling: 订阅不存在也放行，handler 会返回可用的数据
@@ -251,22 +253,16 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 				if needsMaintenance {
 					refreshed, maintenanceErr := subscriptionService.EnsureWindowMaintenance(c.Request.Context(), subscription)
 					if maintenanceErr != nil {
-						AbortWithError(c, 500, "SUBSCRIPTION_MAINTENANCE_FAILED", "Failed to maintain subscription usage windows")
+						status, code, message := subscriptionMaintenanceFailure(maintenanceErr)
+						AbortWithError(c, status, code, message)
 						return
 					}
 					subscription = refreshed
 					_, validateErr = subscriptionService.ValidateAndCheckLimits(subscription, apiKey.Group)
 				}
 				if validateErr != nil {
-					code := "SUBSCRIPTION_INVALID"
-					status := 403
-					if errors.Is(validateErr, service.ErrDailyLimitExceeded) ||
-						errors.Is(validateErr, service.ErrWeeklyLimitExceeded) ||
-						errors.Is(validateErr, service.ErrMonthlyLimitExceeded) {
-						code = "USAGE_LIMIT_EXCEEDED"
-						status = 429
-					}
-					AbortWithError(c, status, code, validateErr.Error())
+					status, code, message := subscriptionValidationFailure(validateErr)
+					AbortWithError(c, status, code, message)
 					return
 				}
 			} else {
@@ -296,6 +292,31 @@ func apiKeyAuthWithSubscription(apiKeyService *service.APIKeyService, subscripti
 		}
 
 		c.Next()
+	}
+}
+
+func subscriptionLookupFailure(err error) (int, string, string) {
+	if service.IsSubscriptionAccessDenied(err) {
+		return http.StatusForbidden, "SUBSCRIPTION_NOT_FOUND", "No active subscription found for this group"
+	}
+	return http.StatusServiceUnavailable, service.ErrBillingServiceUnavailable.Reason, service.ErrBillingServiceUnavailable.Message
+}
+
+func subscriptionMaintenanceFailure(err error) (int, string, string) {
+	if service.IsSubscriptionAccessDenied(err) {
+		return subscriptionLookupFailure(err)
+	}
+	return http.StatusInternalServerError, "SUBSCRIPTION_MAINTENANCE_FAILED", "Failed to maintain subscription usage windows"
+}
+
+func subscriptionValidationFailure(err error) (int, string, string) {
+	switch {
+	case service.IsSubscriptionQuotaExceeded(err):
+		return http.StatusTooManyRequests, "USAGE_LIMIT_EXCEEDED", pkgerrors.Message(err)
+	case service.IsSubscriptionAccessDenied(err):
+		return http.StatusForbidden, "SUBSCRIPTION_INVALID", pkgerrors.Message(err)
+	default:
+		return http.StatusInternalServerError, "BILLING_SERVICE_ERROR", "Failed to validate subscription."
 	}
 }
 

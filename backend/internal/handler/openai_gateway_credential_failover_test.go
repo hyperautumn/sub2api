@@ -128,7 +128,7 @@ func TestOpenAICapacityFailoverExhaustionPreservesMessageAsServerError(t *testin
 	})
 }
 
-func TestOpenAIManagedSingleAccountModelNotFoundExhaustionPreservesStructured400(t *testing.T) {
+func TestOpenAIManagedSingleAccountModelNotFoundExhaustionReturns404(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -139,11 +139,10 @@ func TestOpenAIManagedSingleAccountModelNotFoundExhaustionPreservesStructured400
 		ResponseBody: body,
 	}, false)
 
-	require.Equal(t, http.StatusBadRequest, recorder.Code)
-	require.Equal(t, "invalid_request_error", gjson.Get(recorder.Body.String(), "error.type").String())
+	require.Equal(t, http.StatusNotFound, recorder.Code)
+	require.Equal(t, "not_found_error", gjson.Get(recorder.Body.String(), "error.type").String())
 	require.Equal(t, "model_not_found", gjson.Get(recorder.Body.String(), "error.code").String())
-	require.Equal(t, "model", gjson.Get(recorder.Body.String(), "error.param").String())
-	require.Equal(t, "The requested model is unavailable on this account", gjson.Get(recorder.Body.String(), "error.message").String())
+	require.Equal(t, "Requested model is unavailable", gjson.Get(recorder.Body.String(), "error.message").String())
 }
 
 func TestOpenAIManagedModelNotFoundExhaustionSanitizesMessage(t *testing.T) {
@@ -157,9 +156,9 @@ func TestOpenAIManagedModelNotFoundExhaustionSanitizesMessage(t *testing.T) {
 		ResponseBody: body,
 	}, false)
 
-	require.Equal(t, http.StatusBadRequest, recorder.Code)
+	require.Equal(t, http.StatusNotFound, recorder.Code)
 	require.NotContains(t, recorder.Body.String(), "super-secret-value")
-	require.Contains(t, gjson.Get(recorder.Body.String(), "error.message").String(), "access_token=***")
+	require.Equal(t, "Requested model is unavailable", gjson.Get(recorder.Body.String(), "error.message").String())
 	recorded, ok := c.Get(service.OpsUpstreamErrorMessageKey)
 	require.True(t, ok)
 	require.NotContains(t, recorded, "super-secret-value")

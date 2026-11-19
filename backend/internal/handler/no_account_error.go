@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -13,11 +16,11 @@ import (
 )
 
 // noAccountErrorClassification is the protocol error to return when account
-// selection fails. Persistent model configuration, temporary throttling, and
-// other account availability failures map to 404, 429, and 503 respectively.
+// selection fails.
 type noAccountErrorClassification struct {
 	Status        int
 	ErrType       string
+	Code          string
 	Message       string
 	ModelNotFound bool
 }
@@ -26,11 +29,21 @@ func classifySelectionFailureError(err error, fallback noAccountErrorClassificat
 	if fallback.ModelNotFound || !errors.Is(err, service.ErrAccountSelectionRateLimited) {
 		return fallback
 	}
-	return noAccountErrorClassification{
+	classification := noAccountErrorClassification{
 		Status:  http.StatusTooManyRequests,
 		ErrType: "rate_limit_error",
+		Code:    "rate_limit_exceeded",
 		Message: "Available accounts are temporarily rate-limited or have reached their usage quota. Please retry later.",
 	}
+	switch service.GatewaySelectionLimitReason(err) {
+	case "window_cost":
+		classification.Code = "quota_exceeded"
+		classification.Message = "The available accounts have reached their 5-hour spend limit."
+	case "quota":
+		classification.Code = "quota_exceeded"
+		classification.Message = "The available accounts have exhausted their usage quota."
+	}
+	return classification
 }
 
 // classifyNoAccountError combines scheduler reasons with the persistent model
@@ -61,6 +74,40 @@ func classifyNoAccountError(
 		ErrType: "api_error",
 		Message: "Service temporarily unavailable",
 	}
+	if errors.Is(selectionErr, service.ErrClaudeCodeOnly) {
+		return noAccountErrorClassification{
+			Status:  http.StatusForbidden,
+			ErrType: "permission_error",
+			Code:    "client_not_allowed",
+			Message: "This group only allows Claude Code clients.",
+		}
+	}
+	if errors.Is(selectionErr, service.ErrAccountSelectionUpstreamBalance) {
+		return noAccountErrorClassification{
+			Status:  http.StatusForbidden,
+			ErrType: "permission_error",
+			Code:    "insufficient_balance",
+			Message: "The available upstream accounts have insufficient balance.",
+		}
+	}
+	if selectionErr != nil && !errors.Is(selectionErr, service.ErrNoAvailableAccounts) &&
+		!errors.Is(selectionErr, service.ErrAccountSelectionRateLimited) {
+		return fallback
+	}
+	// A scoped scheduler rejection has already checked the resolved group,
+	// routing restrictions, and model. The original group can differ after fallback.
+	if service.GatewaySelectionLimitReason(selectionErr) != "" {
+		return classifySelectionFailureError(selectionErr, fallback)
+	}
+	if errors.Is(selectionErr, service.ErrChannelModelRestricted) {
+		return noAccountErrorClassification{
+			Status:        http.StatusNotFound,
+			ErrType:       "model_not_found",
+			Code:          "model_not_found",
+			Message:       "Requested model is unavailable",
+			ModelNotFound: true,
+		}
+	}
 
 	routingModel = strings.TrimSpace(routingModel)
 	displayModel = strings.TrimSpace(displayModel)
@@ -80,6 +127,7 @@ func classifyNoAccountError(
 		return noAccountErrorClassification{
 			Status:        http.StatusNotFound,
 			ErrType:       "model_not_found",
+			Code:          "model_not_found",
 			Message:       message,
 			ModelNotFound: true,
 		}
@@ -107,8 +155,23 @@ func classifyNoAccountErrorFromGin(
 		ctx = c.Request.Context()
 	}
 	classification := classifyNoAccountError(ctx, diag, apiKey, routingModel, displayModel, platform, selectionErr)
-	if classification.ModelNotFound {
+	switch classification.Status {
+	case http.StatusNotFound:
 		service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalModelConfiguration)
+	case http.StatusForbidden:
+		if errors.Is(selectionErr, service.ErrAccountSelectionUpstreamBalance) {
+			markOpsRoutingCapacityLimited(c)
+			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonUpstreamRejection)
+		} else {
+			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalPolicyDenied)
+		}
+	case http.StatusTooManyRequests:
+		markOpsRoutingCapacityLimited(c)
+		if c != nil && c.Writer != nil && !c.Writer.Written() {
+			if seconds := time.Until(service.GatewaySelectionRetryAt(selectionErr)).Seconds(); seconds > 0 {
+				c.Header("Retry-After", strconv.Itoa(int(math.Ceil(seconds))))
+			}
+		}
 	}
 	return classification
 }

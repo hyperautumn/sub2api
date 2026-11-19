@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -26,6 +27,7 @@ var errBillingCacheUnavailable = fmt.Errorf("billing cache unavailable")
 var (
 	ErrSubscriptionInvalid       = infraerrors.Forbidden("SUBSCRIPTION_INVALID", "subscription is invalid or expired")
 	ErrBillingServiceUnavailable = infraerrors.ServiceUnavailable("BILLING_SERVICE_ERROR", "Billing service temporarily unavailable. Please retry later.")
+	ErrBillingPriceUnavailable   = infraerrors.InternalServer("BILLING_PRICE_UNAVAILABLE", "Pricing is unavailable for the requested model.")
 	// RPM 超限错误。gateway_handler 负责映射为 HTTP 429。
 	ErrGroupRPMExceeded = infraerrors.TooManyRequests("GROUP_RPM_EXCEEDED", "group requests-per-minute limit exceeded")
 	ErrUserRPMExceeded  = infraerrors.TooManyRequests("USER_RPM_EXCEEDED", "user requests-per-minute limit exceeded")
@@ -38,6 +40,19 @@ var (
 	ErrUserPlatformWeeklyQuotaExhausted  = infraerrors.TooManyRequests("USER_PLATFORM_WEEKLY_QUOTA_EXHAUSTED", "Weekly usage quota exhausted for this platform.")
 	ErrUserPlatformMonthlyQuotaExhausted = infraerrors.TooManyRequests("USER_PLATFORM_MONTHLY_QUOTA_EXHAUSTED", "Monthly usage quota exhausted for this platform.")
 )
+
+// IsSubscriptionAccessDenied reports that a subscription does not authorize
+// the request independently of its usage limits.
+func IsSubscriptionAccessDenied(err error) bool {
+	return errors.Is(err, ErrSubscriptionNotFound) || errors.Is(err, ErrSubscriptionExpired) ||
+		errors.Is(err, ErrSubscriptionSuspended) || errors.Is(err, ErrSubscriptionInvalid)
+}
+
+// IsSubscriptionQuotaExceeded reports a daily, weekly, or monthly plan limit.
+func IsSubscriptionQuotaExceeded(err error) bool {
+	return errors.Is(err, ErrDailyLimitExceeded) || errors.Is(err, ErrWeeklyLimitExceeded) ||
+		errors.Is(err, ErrMonthlyLimitExceeded)
+}
 
 // subscriptionCacheData 订阅缓存数据结构（内部使用）
 type subscriptionCacheData struct {
@@ -465,9 +480,15 @@ func (s *BillingCacheService) convertToPortsData(data *subscriptionCacheData) *S
 
 // getSubscriptionFromDB 从数据库获取订阅数据
 func (s *BillingCacheService) getSubscriptionFromDB(ctx context.Context, userID, groupID int64) (*subscriptionCacheData, error) {
+	if s.subRepo == nil {
+		return nil, ErrBillingServiceUnavailable
+	}
 	sub, err := s.subRepo.GetActiveByUserIDAndGroupID(ctx, userID, groupID)
 	if err != nil {
 		return nil, fmt.Errorf("get subscription: %w", err)
+	}
+	if sub == nil {
+		return nil, ErrSubscriptionNotFound
 	}
 
 	return &subscriptionCacheData{
@@ -846,7 +867,13 @@ func (s *BillingCacheService) checkFixedChargeSubscription(ctx context.Context, 
 	}
 	subData, err := read(ctx, userID, group.ID)
 	if err != nil {
+		if IsSubscriptionAccessDenied(err) {
+			return err
+		}
 		return ErrBillingServiceUnavailable.WithCause(err)
+	}
+	if subData.Status != SubscriptionStatusActive || !subData.ExpiresAt.After(time.Now()) {
+		return ErrSubscriptionInvalid
 	}
 	if group.HasDailyLimit() && subData.DailyUsage+pending > *group.DailyLimitUSD {
 		return ErrDailyLimitExceeded
@@ -1047,6 +1074,12 @@ func (s *BillingCacheService) checkSubscriptionEligibility(ctx context.Context, 
 	// 获取订阅缓存数据
 	subData, err := s.GetSubscriptionStatus(ctx, userID, group.ID)
 	if err != nil {
+		if IsSubscriptionAccessDenied(err) {
+			if s.circuitBreaker != nil {
+				s.circuitBreaker.OnSuccess()
+			}
+			return err
+		}
 		if s.circuitBreaker != nil {
 			s.circuitBreaker.OnFailure(err)
 		}

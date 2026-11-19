@@ -315,6 +315,9 @@ func noAvailableOpenAISelectionError(requestedModel string, compactBlocked bool,
 	}
 	message += " (" + stats.summary(marker) + ")"
 	err := openAINoAvailableSelectionError{message: message}
+	if marker == "" && stats.imageBalanceBlocked() {
+		return fmt.Errorf("%w: %w", ErrAccountSelectionUpstreamBalance, err)
+	}
 	if stats.rateLimited() || marker == "grok_free_quota_soft_gate" ||
 		marker == "grok_team_model_rate_limit" || marker == "grok_model_quota_block" {
 		return accountSelectionRateLimitError{err}
@@ -408,6 +411,14 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 	}
 	if !account.IsSchedulableForModelWithContext(ctx, requestedModel) {
 		if account.IsSchedulable() {
+			if openAIImageBalanceCoolingDown(ctx, account, requestedModel) &&
+				supportsOpenAIRequestModel(account, requestedModel, requireCompact) &&
+				account.SupportsOpenAIEndpointCapability(requiredCapability) {
+				if vetoed, reason := openAIImageSizeVetoReason(ctx, account); vetoed {
+					return reason
+				}
+				return openAIImagesBalanceRateLimitReason
+			}
 			return "model_rate_limited"
 		}
 		return "not_schedulable"
@@ -913,7 +924,7 @@ func (s *OpenAIGatewayService) selectAccountForModelWithExclusionsStickyHit(ctx 
 		slog.Warn("channel pricing restriction blocked request",
 			"group_id", derefGroupID(groupID),
 			"model", requestedModel)
-		return nil, false, fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel)
+		return nil, false, fmt.Errorf("%w supporting model: %s (%w)", ErrNoAvailableAccounts, requestedModel, ErrChannelModelRestricted)
 	}
 
 	// 1. 尝试粘性会话命中
@@ -1046,6 +1057,15 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 			continue
 		}
 
+		if reason := openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx, acc, platform, requestedModel, requireCompact, requiredCapability); reason == openAIImagesBalanceRateLimitReason {
+			if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, acc, requestedModel, requireCompact) {
+				filterStats.exclude("channel_restricted")
+			} else {
+				filterStats.exclude(reason)
+			}
+			continue
+		}
+
 		fresh := s.resolveFreshSchedulableOpenAIAccountBeforeProfit(ctx, acc, platform, requestedModel, false, requiredCapability)
 		if fresh == nil {
 			filterStats.exclude("ineligible")
@@ -1147,7 +1167,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		slog.Warn("channel pricing restriction blocked request",
 			"group_id", derefGroupID(groupID),
 			"model", requestedModel)
-		return nil, fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel)
+		return nil, fmt.Errorf("%w supporting model: %s (%w)", ErrNoAvailableAccounts, requestedModel, ErrChannelModelRestricted)
 	}
 
 	cfg := s.schedulingConfig()

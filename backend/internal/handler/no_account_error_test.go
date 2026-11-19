@@ -90,6 +90,41 @@ func TestClassifyNoAccountError_AccountWideRateLimit(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, got.Status)
 }
 
+func TestClassifyNoAccountError_PermissionAndDependencyFailure(t *testing.T) {
+	apiKey := &service.APIKey{GroupID: ptrInt64(7)}
+	diagnoser := &fakeDiagnoser{resp: service.ModelAvailabilityDiagnosis{HasAccountsInPool: true}}
+	for _, tc := range []struct {
+		err    error
+		status int
+	}{
+		{fmt.Errorf("resolve group: %w", service.ErrClaudeCodeOnly), http.StatusForbidden},
+		{fmt.Errorf("%w: %w", service.ErrNoAvailableAccounts, service.ErrAccountSelectionUpstreamBalance), http.StatusForbidden},
+		{fmt.Errorf("load account pool: connection failed"), http.StatusServiceUnavailable},
+		{fmt.Errorf("%w: %w", service.ErrNoAvailableAccounts, service.ErrChannelModelRestricted), http.StatusNotFound},
+	} {
+		c := newTestGinContextWithRequest()
+		got := classifyNoAccountErrorFromGin(c, diagnoser, apiKey, "claude", "claude", service.PlatformAnthropic, tc.err)
+		require.Equal(t, tc.status, got.Status)
+	}
+	require.Empty(t, diagnoser.calls)
+}
+
+func TestGatewayStreamingErrorRetainsLogicalStatus(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	c.Writer.Flush()
+
+	(&GatewayHandler{}).handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error", "quota_exceeded", "Quota exceeded", true)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Contains(t, recorder.Body.String(), `"code":"quota_exceeded"`)
+	streamError, ok := service.GetOpsStreamError(c)
+	require.True(t, ok)
+	require.Equal(t, http.StatusTooManyRequests, streamError.IntendedStatus)
+	require.Equal(t, "quota_exceeded", streamError.Code)
+}
+
 func TestClassifyNoAccountError_NilAPIKey_Falls503(t *testing.T) {
 	c := newTestGinContextWithRequest()
 	fd := &fakeDiagnoser{resp: service.ModelAvailabilityDiagnosis{HasAccountsInPool: true, HasModelSupport: false}}

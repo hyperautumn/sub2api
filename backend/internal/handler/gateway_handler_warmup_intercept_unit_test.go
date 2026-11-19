@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/usagestats"
 	middleware "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 
@@ -163,13 +165,18 @@ func newTestGatewayHandler(t *testing.T, group *service.Group, accounts []*servi
 
 func newTestGatewayHandlerWithSchedulerCache(t *testing.T, group *service.Group, schedulerCache service.SchedulerCache) (*GatewayHandler, func()) {
 	t.Helper()
+	return newTestGatewayHandlerForSelection(t, group, schedulerCache, nil, nil, nil)
+}
+
+func newTestGatewayHandlerForSelection(t *testing.T, group *service.Group, schedulerCache service.SchedulerCache, accountRepo service.AccountRepository, usageLogRepo service.UsageLogRepository, schedulerConcurrency *service.ConcurrencyService) (*GatewayHandler, func()) {
+	t.Helper()
 
 	schedulerSnapshot := service.NewSchedulerSnapshotService(schedulerCache, nil, nil, nil, nil)
 
 	gwSvc := service.NewGatewayService(
-		nil, // accountRepo (not used: scheduler snapshot hit)
+		accountRepo,
 		&fakeGroupRepo{group: group},
-		nil, // usageLogRepo
+		usageLogRepo,
 		nil, // usageBillingRepo
 		nil, // userRepo
 		nil, // userSubRepo
@@ -177,7 +184,7 @@ func newTestGatewayHandlerWithSchedulerCache(t *testing.T, group *service.Group,
 		nil, // cache (disable sticky)
 		nil, // cfg
 		schedulerSnapshot,
-		nil, // concurrencyService (disable load-aware; tryAcquire always acquired)
+		schedulerConcurrency,
 		nil, // billingService
 		nil, // rateLimitService
 		nil, // billingCacheService
@@ -217,6 +224,60 @@ func newTestGatewayHandlerWithSchedulerCache(t *testing.T, group *service.Group,
 		billingCacheSvc.Stop()
 	}
 	return h, cleanup
+}
+
+type gatewayWindowAccountRepo struct {
+	service.AccountRepository
+	accounts []service.Account
+}
+
+func (r gatewayWindowAccountRepo) ListModelAvailabilityCandidates(context.Context, *int64, []string, bool) ([]service.Account, error) {
+	return r.accounts, nil
+}
+
+type gatewayWindowUsageRepo struct {
+	service.UsageLogRepository
+}
+
+func (gatewayWindowUsageRepo) GetAccountWindowStats(context.Context, int64, time.Time) (*usagestats.AccountStats, error) {
+	return &usagestats.AccountStats{StandardCost: 35}, nil
+}
+
+func TestGatewayMessagesReturns429WhenAllAccountsHitFiveHourSpendLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	group := &service.Group{ID: 2001, Hydrated: true, Platform: service.PlatformAnthropic, Status: service.StatusActive}
+	accounts := make([]service.Account, 5)
+	cached := make([]*service.Account, 0, len(accounts))
+	for i := range accounts {
+		account := &accounts[i]
+		*account = service.Account{
+			ID: int64(i + 1), Platform: service.PlatformAnthropic, Type: service.AccountTypeOAuth,
+			Status: service.StatusActive, Schedulable: true, Concurrency: 1,
+			AccountGroups: []service.AccountGroup{{GroupID: group.ID}},
+			Extra:         map[string]any{"window_cost_limit": 30, "window_cost_sticky_reserve": 5},
+		}
+		cached = append(cached, account)
+	}
+	h, cleanup := newTestGatewayHandlerForSelection(t, group, &fakeSchedulerCache{accounts: cached},
+		gatewayWindowAccountRepo{accounts: accounts}, gatewayWindowUsageRepo{}, service.NewConcurrencyService(&fakeConcurrencyCache{}))
+	defer cleanup()
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := `{"model":"claude-opus-4-8","max_tokens":16,"messages":[{"role":"user","content":"Say OK"}]}`
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	apiKey := &service.APIKey{ID: 12, UserID: 21, GroupID: &group.ID, Group: group, User: &service.User{ID: 21, Balance: 100}}
+	c.Set(string(middleware.ContextKeyAPIKey), apiKey)
+	c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: apiKey.UserID, Concurrency: 5})
+
+	h.Messages(c)
+
+	require.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
+	require.JSONEq(t, `{"type":"error","error":{"type":"rate_limit_error","code":"quota_exceeded","message":"The available accounts have reached their 5-hour spend limit."}}`, rec.Body.String())
+	require.Empty(t, rec.Header().Get("Retry-After"))
+	_, selected := c.Get(opsAccountIDKey)
+	require.False(t, selected)
 }
 
 func TestGatewayHandlerMessages_InterceptWarmup_AntigravityAccount_MixedSchedulingV1(t *testing.T) {

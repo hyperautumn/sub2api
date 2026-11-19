@@ -422,10 +422,11 @@ func (r *fixedChargeAPIKeyRepoStub) GetRateLimitData(context.Context, int64) (*A
 type fixedChargeSubscriptionRepoStub struct {
 	UserSubscriptionRepository
 	sub *UserSubscription
+	err error
 }
 
 func (r *fixedChargeSubscriptionRepoStub) GetActiveByUserIDAndGroupID(context.Context, int64, int64) (*UserSubscription, error) {
-	return r.sub, nil
+	return r.sub, r.err
 }
 
 func TestReserveFixedCharge(t *testing.T) {
@@ -489,7 +490,7 @@ func TestReserveFixedCharge(t *testing.T) {
 
 		daily := 5.0
 		group := &Group{ID: 2, SubscriptionType: SubscriptionTypeSubscription, DailyLimitUSD: &daily}
-		subRepo := &fixedChargeSubscriptionRepoStub{sub: &UserSubscription{Status: SubscriptionStatusActive, DailyUsageUSD: 4}}
+		subRepo := &fixedChargeSubscriptionRepoStub{sub: &UserSubscription{Status: SubscriptionStatusActive, ExpiresAt: now.Add(time.Hour), DailyUsageUSD: 4}}
 		svc = reservingSvc(&fixedChargeCacheStub{sub: &SubscriptionCacheData{Status: SubscriptionStatusActive}}, subRepo, nil)
 		require.ErrorIs(t, reserve(svc, nil, group, &UserSubscription{ID: 1}, 2), ErrDailyLimitExceeded, "订阅缓存用量可能滞后")
 	})
@@ -498,7 +499,7 @@ func TestReserveFixedCharge(t *testing.T) {
 		daily := 110.0
 		group := &Group{ID: 2, SubscriptionType: SubscriptionTypeSubscription, DailyLimitUSD: &daily}
 		sub := &UserSubscription{ID: 1}
-		cache := &fixedChargeCacheStub{balance: 1000, sub: &SubscriptionCacheData{Status: SubscriptionStatusActive}}
+		cache := &fixedChargeCacheStub{balance: 1000, sub: &SubscriptionCacheData{Status: SubscriptionStatusActive, ExpiresAt: time.Now().Add(time.Hour)}}
 		svc := reservingSvc(cache, nil, nil)
 		first, err := svc.ReserveFixedCharge(ctx, user, nil, group, sub, 103.5)
 		require.NoError(t, err)
@@ -518,6 +519,19 @@ func TestReserveFixedCharge(t *testing.T) {
 		for key, reservations := range cache.reserved {
 			require.Empty(t, reservations, "拒绝与释放都不留下预留：%s", key)
 		}
+	})
+
+	t.Run("removed subscription and repository outage have distinct errors", func(t *testing.T) {
+		group := &Group{ID: 2, SubscriptionType: SubscriptionTypeSubscription}
+		sub := &UserSubscription{ID: 1}
+		subRepo := &fixedChargeSubscriptionRepoStub{err: ErrSubscriptionNotFound}
+		svc := reservingSvc(&fixedChargeCacheStub{}, subRepo, nil)
+		require.ErrorIs(t, reserve(svc, nil, group, sub, 1), ErrSubscriptionNotFound)
+		require.ErrorIs(t, svc.CheckBillingEligibility(ctx, user, nil, group, sub, ""), ErrSubscriptionNotFound)
+
+		subRepo.err = errors.New("subscription repository unavailable")
+		require.ErrorIs(t, reserve(svc, nil, group, sub, 1), ErrBillingServiceUnavailable)
+		require.ErrorIs(t, svc.CheckBillingEligibility(ctx, user, nil, group, sub, ""), ErrBillingServiceUnavailable)
 	})
 
 	t.Run("simple mode skips the check", func(t *testing.T) {

@@ -72,7 +72,7 @@ func (s *GatewayService) SelectAccountForModelWithExclusions(ctx context.Context
 		slog.Warn("channel pricing restriction blocked request",
 			"group_id", derefGroupID(groupID),
 			"model", requestedModel)
-		return nil, fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel)
+		return nil, fmt.Errorf("%w supporting model: %s (%w)", ErrNoAvailableAccounts, requestedModel, ErrChannelModelRestricted)
 	}
 
 	// anthropic/gemini 分组支持混合调度（包含启用了 mixed_scheduling 的 antigravity 账户）
@@ -125,7 +125,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		slog.Warn("channel pricing restriction blocked request",
 			"group_id", derefGroupID(groupID),
 			"model", requestedModel)
-		return nil, fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel)
+		return nil, fmt.Errorf("%w supporting model: %s (%w)", ErrNoAvailableAccounts, requestedModel, ErrChannelModelRestricted)
 	}
 
 	var stickyAccountID int64
@@ -168,6 +168,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			localExcluded[k] = v
 		}
 
+		var sessionLimited map[int64]struct{}
 		for {
 			account, err := s.SelectAccountForModelWithExclusions(ctx, groupID, sessionHash, requestedModel, localExcluded)
 			if err != nil {
@@ -175,20 +176,22 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			}
 
 			result, err := s.tryAcquireAccountSlot(ctx, account.ID, account.Concurrency)
-			if err == nil && result.Acquired {
-				// 获取槽位后检查会话限制（使用 sessionHash 作为会话标识符）
-				if !s.checkAndRegisterSession(ctx, account, sessionHash) {
-					result.ReleaseFunc()                   // 释放槽位
-					localExcluded[account.ID] = struct{}{} // 排除此账号
-					continue                               // 重新选择
-				}
-				return s.newSelectionResult(ctx, account, true, result.ReleaseFunc, nil)
-			}
-
-			// 对于等待计划的情况，也需要先检查会话限制
+			acquired := err == nil && result.Acquired
+			// Acquired slots and wait plans both require a session reservation.
 			if !s.checkAndRegisterSession(ctx, account, sessionHash) {
+				if acquired {
+					result.ReleaseFunc()
+				}
+				if sessionLimited == nil {
+					sessionLimited = make(map[int64]struct{})
+					ctx = context.WithValue(ctx, gatewaySessionLimitIDsKey{}, sessionLimited)
+				}
 				localExcluded[account.ID] = struct{}{}
+				sessionLimited[account.ID] = struct{}{}
 				continue
+			}
+			if acquired {
+				return s.newSelectionResult(ctx, account, true, result.ReleaseFunc, nil)
 			}
 
 			if stickyAccountID > 0 && stickyAccountID == account.ID && s.concurrencyService != nil {
@@ -225,7 +228,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		return nil, err
 	}
 	if len(accounts) == 0 {
-		return nil, ErrNoAvailableAccounts
+		return nil, s.gatewayNoSelectionError(ctx, groupID, requestedModel, platform, useMixed, false, accounts, excludedIDs, ErrNoAvailableAccounts)
 	}
 	ctx = s.withWindowCostPrefetch(ctx, accounts)
 	ctx = s.withRPMPrefetch(ctx, accounts)
@@ -339,7 +342,11 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			}
 		}
 
-		if len(routingCandidates) > 0 {
+		// A routed sticky account can still use its reserved budget even when
+		// every routed account is unavailable to non-sticky requests.
+		hasRoutedSticky := sessionHash != "" && stickyAccountID > 0 &&
+			containsInt64(routingAccountIDs, stickyAccountID) && !isExcluded(stickyAccountID)
+		if len(routingCandidates) > 0 || hasRoutedSticky {
 			// 1.5. 在路由账号范围内检查粘性会话
 			if sessionHash != "" && stickyAccountID > 0 {
 				slog.Debug("sticky.layer1_5_checking",
@@ -426,7 +433,9 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 								stickyCacheMissReason, stickyAccountID, shortSessionHash(sessionHash), currentRPM, baseRPM)
 						}
 					} else {
-						_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
+						if s.cache != nil {
+							_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
+						}
 						logger.LegacyPrintf("service.gateway", "[StickyCacheMiss] reason=account_cleared account_id=%d session=%s current_rpm=0 base_rpm=0",
 							stickyAccountID, shortSessionHash(sessionHash))
 					}
@@ -694,15 +703,16 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	}
 
 	if len(candidates) == 0 {
+		fallback := ErrNoAvailableAccounts
 		if channelRestrictedCount > 0 {
 			slog.Warn("channel pricing restriction blocked request",
 				"group_id", derefGroupID(groupID),
 				"model", requestedModel,
 				"restricted_accounts", channelRestrictedCount,
 				"total_accounts", len(accounts))
-			return nil, fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel)
+			fallback = fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel)
 		}
-		return nil, ErrNoAvailableAccounts
+		return nil, s.gatewayNoSelectionError(ctx, groupID, requestedModel, platform, useMixed, false, accounts, excludedIDs, fallback)
 	}
 
 	accountLoads := make([]AccountWithConcurrency, 0, len(candidates))
@@ -778,9 +788,14 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 
 	// ============ Layer 3: 兜底排队 ============
 	s.sortCandidatesForFallback(candidates, preferOAuth, cfg.FallbackSelectionMode)
+	var sessionLimited map[int64]struct{}
 	for _, acc := range candidates {
 		// 会话数量限制检查（等待计划也需要占用会话配额）
 		if !s.checkAndRegisterSession(ctx, acc, sessionHash) {
+			if sessionLimited == nil {
+				sessionLimited = make(map[int64]struct{})
+			}
+			sessionLimited[acc.ID] = struct{}{}
 			continue // 会话限制已满，尝试下一个账号
 		}
 		return s.newSelectionResult(ctx, acc, false, nil, &AccountWaitPlan{
@@ -790,7 +805,8 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			MaxWaiting:     cfg.FallbackMaxWaiting,
 		})
 	}
-	return nil, ErrNoAvailableAccounts
+	ctx = context.WithValue(ctx, gatewaySessionLimitIDsKey{}, sessionLimited)
+	return nil, s.gatewayNoSelectionError(ctx, groupID, requestedModel, platform, useMixed, false, accounts, excludedIDs, ErrNoAvailableAccounts)
 }
 
 func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates []*Account, groupID *int64, sessionHash string, preferOAuth bool) (*AccountSelectionResult, bool, error) {
@@ -1357,6 +1373,9 @@ func (s *GatewayService) isAccountSchedulableForWindowCost(ctx context.Context, 
 	}
 
 	// 缓存未命中，从数据库查询
+	if s.usageLogRepo == nil {
+		return true
+	}
 	{
 		// 使用统一的窗口开始时间计算逻辑（考虑窗口过期情况）
 		startTime := account.GetCurrentWindowStartTime()
@@ -2154,10 +2173,12 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 
 	if selected == nil {
 		stats := s.logDetailedSelectionFailure(ctx, groupID, sessionHash, requestedModel, platform, accounts, excludedIDs, false)
+		fallback := ErrNoAvailableAccounts
 		if requestedModel != "" {
-			return nil, gatewaySelectionFailureError(requestedModel, stats)
+			fallback = gatewaySelectionFailureError(requestedModel, stats)
 		}
-		return nil, ErrNoAvailableAccounts
+		requirePrivacy := schedGroup != nil && schedGroup.RequirePrivacySet
+		return nil, s.gatewayNoSelectionError(ctx, groupID, requestedModel, platform, false, requirePrivacy, accounts, excludedIDs, fallback)
 	}
 
 	// 4. 建立粘性绑定
@@ -2421,10 +2442,12 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 
 	if selected == nil {
 		stats := s.logDetailedSelectionFailure(ctx, groupID, sessionHash, requestedModel, nativePlatform, accounts, excludedIDs, true)
+		fallback := ErrNoAvailableAccounts
 		if requestedModel != "" {
-			return nil, gatewaySelectionFailureError(requestedModel, stats)
+			fallback = gatewaySelectionFailureError(requestedModel, stats)
 		}
-		return nil, ErrNoAvailableAccounts
+		requirePrivacy := schedGroup != nil && schedGroup.RequirePrivacySet
+		return nil, s.gatewayNoSelectionError(ctx, groupID, requestedModel, nativePlatform, true, requirePrivacy, accounts, excludedIDs, fallback)
 	}
 
 	// 4. 建立粘性绑定
@@ -2608,11 +2631,7 @@ func appendSelectionFailureRateSample(samples []string, accountID int64, remaini
 }
 
 func gatewaySelectionFailureError(requestedModel string, stats selectionFailureStats) error {
-	err := fmt.Errorf("%w supporting model: %s (%s)", ErrNoAvailableAccounts, requestedModel, summarizeSelectionFailureStats(stats))
-	if stats.ModelRateLimited > 0 {
-		return accountSelectionRateLimitError{err}
-	}
-	return err
+	return fmt.Errorf("%w supporting model: %s (%s)", ErrNoAvailableAccounts, requestedModel, summarizeSelectionFailureStats(stats))
 }
 
 func summarizeSelectionFailureStats(stats selectionFailureStats) string {

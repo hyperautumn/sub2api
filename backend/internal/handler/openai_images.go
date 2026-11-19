@@ -81,7 +81,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		routingModel = resolvedModel
 	}
 	if !compositeTargetPlatformAllowed(c, apiKey, requestModel, service.PlatformOpenAI) {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Model is not supported by this OpenAI-compatible endpoint for composite groups")
+		h.errorResponse(c, http.StatusNotFound, "model_not_found", "Model is not supported by this OpenAI-compatible endpoint for composite groups")
 		return
 	}
 
@@ -164,6 +164,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
+	var failures gatewayFailoverErrors
 	stopJSONKeepalive := func() {}
 	jsonKeepaliveStarted := false
 	defer func() { stopJSONKeepalive() }()
@@ -194,26 +195,26 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 					h.handleStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", service.OpenAIImageSizeTierUnsupportedMessage(parsed.Size, tier), streamStarted)
 					return
 				}
-				cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, clientRequestModel, routingModel, service.PlatformOpenAI, err)
+				cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, routingModel, clientRequestModel, service.PlatformOpenAI, err)
 				if !cls.ModelNotFound {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				}
 				message := cls.Message
-				if !cls.ModelNotFound {
+				if cls.Status >= 500 {
 					message = "No available compatible accounts"
 				}
-				h.handleStreamingAwareError(c, cls.Status, cls.ErrType, message, streamStarted)
+				h.handleStreamingAwareErrorWithCode(c, cls.Status, cls.ErrType, cls.Code, message, streamStarted, true)
 				return
 			}
 			if lastFailoverErr != nil {
-				h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
+				h.handleFailoverExhausted(c, failures.terminal(lastFailoverErr), streamStarted)
 			} else {
 				h.handleFailoverExhaustedSimple(c, 502, streamStarted)
 			}
 			return
 		}
 		if selection == nil || selection.Account == nil {
-			cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, clientRequestModel, routingModel, service.PlatformOpenAI, nil)
+			cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, routingModel, clientRequestModel, service.PlatformOpenAI, nil)
 			if !cls.ModelNotFound {
 				markOpsRoutingCapacityLimited(c)
 			}
@@ -347,13 +348,14 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 					h.gatewayService.RecordOpenAIAccountSwitch()
 					failedAccountIDs[account.ID] = struct{}{}
 					lastFailoverErr = failoverErr
+					failures.record(account.ID, failoverErr)
 					if switchCount >= maxAccountSwitches {
-						h.handleFailoverExhausted(c, failoverErr, streamStarted)
+						h.handleFailoverExhausted(c, failures.terminal(lastFailoverErr), streamStarted)
 						return
 					}
 					switchCount++
 					if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
-						h.handleFailoverExhausted(c, failoverErr, streamStarted)
+						h.handleFailoverExhausted(c, failures.terminal(lastFailoverErr), streamStarted)
 						return
 					}
 					reqLog.Warn("openai.images.upstream_failover_switching",

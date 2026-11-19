@@ -951,6 +951,10 @@ func (s *OpenAIGatewayService) handleErrorResponsePassthrough(
 		Detail:               upstreamDetail,
 		UpstreamResponseBody: upstreamDetail,
 	})
+	if business, ok := ClassifyUpstreamBusinessError(resp.StatusCode, body); ok && !cyberHit {
+		writeOpenAIBusinessError(c, business, resp.Header)
+		return fmt.Errorf("upstream error: %d (%s)", resp.StatusCode, business.Code)
+	}
 	// context-window 超限是确定性请求失败（shouldFailoverOpenAIPassthroughResponse
 	// 已保证不切号），其文案对客户端可操作（如触发自动压缩）；在净化信封内保留
 	// 脱敏后的上游消息，而不是抹成通用文案。

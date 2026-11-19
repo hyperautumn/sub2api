@@ -73,7 +73,7 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 	reqModel := modelResult.String()
 	ensureCompositeTargetPlatform(c, apiKey, reqModel)
 	if !compositeTargetPlatformAllowed(c, apiKey, reqModel, service.PlatformOpenAI) {
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Model is not supported by this OpenAI-compatible endpoint for composite groups")
+		h.errorResponse(c, http.StatusNotFound, "model_not_found", "Model is not supported by this OpenAI-compatible endpoint for composite groups")
 		return
 	}
 	reqLog = reqLog.With(zap.String("model", reqModel))
@@ -123,6 +123,7 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	var lastFailoverErr *service.UpstreamFailoverError
+	var failures gatewayFailoverErrors
 	switchCount := 0
 	maxAccountSwitches := h.maxAccountSwitches
 	if maxAccountSwitches <= 0 {
@@ -162,11 +163,11 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 				if !cls.ModelNotFound {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				}
-				h.errorResponse(c, cls.Status, cls.ErrType, cls.Message)
+				h.handleStreamingAwareErrorWithCode(c, cls.Status, cls.ErrType, cls.Code, cls.Message, false, true)
 				return
 			}
 			if lastFailoverErr != nil {
-				h.handleFailoverExhausted(c, lastFailoverErr, false)
+				h.handleFailoverExhausted(c, failures.terminal(lastFailoverErr), false)
 			} else {
 				h.errorResponse(c, http.StatusBadGateway, "api_error", "Upstream request failed")
 			}
@@ -177,7 +178,7 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 			if !cls.ModelNotFound {
 				markOpsRoutingCapacityLimited(c)
 			}
-			h.errorResponse(c, cls.Status, cls.ErrType, cls.Message)
+			h.handleStreamingAwareErrorWithCode(c, cls.Status, cls.ErrType, cls.Code, cls.Message, false, true)
 			return
 		}
 		account := selection.Account
@@ -239,8 +240,9 @@ func (h *OpenAIGatewayHandler) Embeddings(c *gin.Context) {
 				h.gatewayService.RecordOpenAIAccountSwitch()
 				failedAccountIDs[account.ID] = struct{}{}
 				lastFailoverErr = failoverErr
+				failures.record(account.ID, failoverErr)
 				if switchCount >= maxAccountSwitches {
-					h.handleFailoverExhausted(c, failoverErr, false)
+					h.handleFailoverExhausted(c, failures.terminal(lastFailoverErr), false)
 					return
 				}
 				switchCount++

@@ -577,12 +577,61 @@ func TestApiKeyAuthWithSubscriptionGoogle_DisabledKey(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	require.Equal(t, http.StatusForbidden, rec.Code)
 	var resp googleErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.Equal(t, http.StatusUnauthorized, resp.Error.Code)
+	require.Equal(t, http.StatusForbidden, resp.Error.Code)
 	require.Equal(t, "API key is disabled", resp.Error.Message)
-	require.Equal(t, "UNAUTHENTICATED", resp.Error.Status)
+	require.Equal(t, "PERMISSION_DENIED", resp.Error.Status)
+}
+
+func TestGatewayAuthDistinguishesSubscriptionDenialFromLookupOutage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := &config.Config{RunMode: config.RunModeStandard}
+	group := &service.Group{ID: 77, Status: service.StatusActive, Hydrated: true, SubscriptionType: service.SubscriptionTypeSubscription}
+	key := &service.APIKey{
+		ID: 501, Key: "test-subscription-lookup", Status: service.StatusActive,
+		User:    &service.User{ID: 999, Status: service.StatusActive, Balance: 100},
+		GroupID: &group.ID, Group: group,
+	}
+	for _, tc := range []struct {
+		name    string
+		err     error
+		status  int
+		message string
+	}{
+		{"removed", service.ErrSubscriptionNotFound, http.StatusForbidden, "No active subscription"},
+		{"unavailable", errors.New("private subscription backend error"), http.StatusServiceUnavailable, "Billing service temporarily unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			keyService := newTestAPIKeyService(fakeAPIKeyRepo{
+				getByKey: func(context.Context, string) (*service.APIKey, error) {
+					clone := *key
+					return &clone, nil
+				},
+			})
+			subscriptions := service.NewSubscriptionService(nil, fakeGoogleSubscriptionRepo{
+				getActive: func(context.Context, int64, int64) (*service.UserSubscription, error) {
+					return nil, tc.err
+				},
+			}, nil, nil, cfg)
+			t.Cleanup(subscriptions.Stop)
+			router := gin.New()
+			handler := func(c *gin.Context) { c.Status(http.StatusOK) }
+			router.GET("/v1/messages", apiKeyAuthWithSubscription(keyService, subscriptions, cfg), handler)
+			router.GET("/v1beta/models", APIKeyAuthWithSubscriptionGoogle(keyService, subscriptions, cfg), handler)
+
+			for _, path := range []string{"/v1/messages", "/v1beta/models"} {
+				req := httptest.NewRequest(http.MethodGet, path, nil)
+				req.Header.Set("x-api-key", key.Key)
+				rec := httptest.NewRecorder()
+				router.ServeHTTP(rec, req)
+				require.Equal(t, tc.status, rec.Code, "%s: %s", path, rec.Body)
+				require.Contains(t, rec.Body.String(), tc.message)
+				require.NotContains(t, rec.Body.String(), "private subscription backend error")
+			}
+		})
+	}
 }
 
 func TestApiKeyAuthWithSubscriptionGoogle_InsufficientBalance(t *testing.T) {

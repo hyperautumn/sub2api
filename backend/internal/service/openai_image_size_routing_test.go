@@ -587,3 +587,26 @@ func TestOpenAIImageSizeTierUnsupported(t *testing.T) {
 	_, unsupported = svc.OpenAIImageSizeTierUnsupported(context.Background(), &groupID, "gpt-5.4", "3840x2160", OpenAIEndpointCapabilityChatCompletions, "")
 	require.False(t, unsupported)
 }
+
+func TestSelectAccountWithSchedulerForImages_RecognizesPersistedBalanceCooldown(t *testing.T) {
+	for _, mode := range openAIImageSizeSchedulerModes {
+		t.Run(mode.name, func(t *testing.T) {
+			const imageModel = "gpt-image-2"
+			account := newOpenAIImageSizeTestAccount(81001, 0)
+			now := time.Now()
+			setAccountModelRateLimitSnapshot(&account, openAIImageGenerationRateLimitKey, now.Add(time.Minute), openAIImagesBalanceRateLimitReason, now)
+			groupID := int64(93048)
+			svc := newOpenAIImageSizeSchedulerTestService(mode, []Account{account}, nil, schedulerTestConcurrencyCache{})
+			selection, _, err := svc.SelectAccountWithSchedulerForImages(context.Background(), &groupID, "", imageModel, nil, OpenAIImagesCapabilityNative)
+			require.Nil(t, selection)
+			require.ErrorIs(t, err, ErrNoAvailableAccounts)
+			require.ErrorIs(t, err, ErrAccountSelectionUpstreamBalance)
+
+			unblocked := newOpenAIImageSizeTestAccount(81002, 0)
+			svc = newOpenAIImageSizeSchedulerTestService(mode, []Account{account, unblocked}, nil, schedulerTestConcurrencyCache{})
+			selection, _, err = svc.SelectAccountWithSchedulerForImages(context.Background(), &groupID, "", imageModel, nil, OpenAIImagesCapabilityNative)
+			require.NoError(t, err)
+			require.Equal(t, unblocked.ID, selection.Account.ID)
+		})
+	}
+}

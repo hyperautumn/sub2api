@@ -3398,14 +3398,14 @@ func TestOpenAIResponsesWebSocketSimpleModeRechecksKeyWindows(t *testing.T) {
 		t.Run(mode+"/after-account-selection", func(t *testing.T) {
 			runOpenAIResponsesWebSocketUsageLogCase(t, openAIResponsesWSUsageLogCase{
 				firstPayload: `{"type":"response.create","model":"gpt-5.1"}`,
-				ingressMode:  mode, simpleModeRejectAtRead: 2, firstFrameCloseExpected: true, closeReason: "billing check failed",
+				ingressMode:  mode, simpleModeRejectAtRead: 2, firstFrameCloseExpected: true, closeStatus: coderws.StatusTryAgainLater, closeReason: "5小时限额已用完",
 			})
 		})
 		t.Run(mode+"/followup-turn", func(t *testing.T) {
 			runOpenAIResponsesWebSocketUsageLogCase(t, openAIResponsesWSUsageLogCase{
 				firstPayload:  `{"type":"response.create","model":"gpt-5.1"}`,
 				secondPayload: `{"type":"response.create","model":"gpt-5.1"}`,
-				ingressMode:   mode, simpleModeRejectAtRead: 3, secondTurnCloseExpected: true, closeReason: "billing check failed",
+				ingressMode:   mode, simpleModeRejectAtRead: 3, secondTurnCloseExpected: true, closeStatus: coderws.StatusTryAgainLater, closeReason: "5小时限额已用完",
 			})
 		})
 	}

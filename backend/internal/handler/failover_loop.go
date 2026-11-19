@@ -128,6 +128,7 @@ type FailoverState struct {
 	FailedAccountIDs      map[int64]struct{}
 	SameAccountRetryCount map[int64]int
 	LastFailoverErr       *service.UpstreamFailoverError
+	failures              gatewayFailoverErrors
 	ForceCacheBilling     bool
 	hasBoundSession       bool
 
@@ -139,6 +140,54 @@ type FailoverState struct {
 	profitVetoedAccountIDs map[int64]struct{}
 	// profitVetoCount 本次请求累计的利润否决次数，用于 maxProfitVetoAttempts 上限。
 	profitVetoCount int
+}
+
+// gatewayFailoverErrors keeps the final result of each attempted account.
+type gatewayFailoverErrors map[int64]*service.UpstreamFailoverError
+
+func (e *gatewayFailoverErrors) record(accountID int64, err *service.UpstreamFailoverError) {
+	if err == nil {
+		return
+	}
+	if *e == nil {
+		*e = make(gatewayFailoverErrors)
+	}
+	(*e)[accountID] = err
+}
+
+func (e gatewayFailoverErrors) terminal(last *service.UpstreamFailoverError) *service.UpstreamFailoverError {
+	if last == nil || !last.ShouldRetryNextAccount() || len(e) < 2 {
+		return last
+	}
+	var selected *service.UpstreamFailoverError
+	var selectedID int64
+	var selectedRank int
+	for accountID, err := range e {
+		rank := gatewayFailoverErrorRank(err)
+		if selected == nil || rank > selectedRank || (rank == selectedRank && accountID < selectedID) {
+			selected, selectedID, selectedRank = err, accountID, rank
+		}
+	}
+	return selected
+}
+
+func gatewayFailoverErrorRank(err *service.UpstreamFailoverError) int {
+	business, ok := err.BusinessError()
+	if !ok {
+		return 4
+	}
+	switch business.Status {
+	case http.StatusTooManyRequests:
+		return 3
+	case http.StatusForbidden:
+		return 2
+	default:
+		return 1
+	}
+}
+
+func (s *FailoverState) TerminalError() *service.UpstreamFailoverError {
+	return s.failures.terminal(s.LastFailoverErr)
 }
 
 // NewFailoverState 创建 failover 状态
@@ -204,6 +253,7 @@ func (s *FailoverState) HandleFailoverError(
 		return FailoverCanceled
 	}
 	s.LastFailoverErr = failoverErr
+	s.failures.record(accountID, failoverErr)
 	if failoverErr == nil || !failoverErr.ShouldRetryNextAccount() {
 		return FailoverExhausted
 	}

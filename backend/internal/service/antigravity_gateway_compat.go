@@ -270,7 +270,7 @@ func (s *AntigravityGatewayService) prepareAntigravityCompatCall(
 		(claudeRequest.Thinking.Type == "enabled" || claudeRequest.Thinking.Type == "adaptive")
 	mappedModel = applyThinkingModelSuffix(mappedModel, thinkingEnabled)
 	if geminiImageGenerationDenied(c, nil, request.originalModel, mappedModel) {
-		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", ImageGenerationPermissionMessage())
+		return nil, s.writeAntigravityCompatError(c, http.StatusForbidden, "permission_error", ImageGenerationPermissionMessage())
 	}
 
 	if s.tokenProvider == nil {

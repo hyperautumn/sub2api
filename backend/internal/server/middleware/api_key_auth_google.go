@@ -91,7 +91,7 @@ func APIKeyAuthWithSubscriptionGoogle(apiKeyService *service.APIKeyService, subs
 			apiKey.Status != service.StatusAPIKeyExpired &&
 			apiKey.Status != service.StatusAPIKeyQuotaExhausted {
 			MarkIngressRejected(c, IngressRejectAPIKeyDisabled)
-			abortWithGoogleError(c, 401, "API key is disabled")
+			abortWithGoogleError(c, http.StatusForbidden, "API key is disabled")
 			return
 		}
 
@@ -116,7 +116,7 @@ func APIKeyAuthWithSubscriptionGoogle(apiKeyService *service.APIKeyService, subs
 		}
 		if !apiKey.User.IsActive() {
 			MarkIngressRejected(c, IngressRejectUserInactive)
-			abortWithGoogleError(c, 401, "User account is not active")
+			abortWithGoogleError(c, http.StatusForbidden, "User account is not active")
 			return
 		}
 		if code, message, ok := validateAPIKeyGroupAvailable(apiKey); !ok {
@@ -180,7 +180,8 @@ func APIKeyAuthWithSubscriptionGoogle(apiKeyService *service.APIKeyService, subs
 				apiKey.Group.ID,
 			)
 			if err != nil {
-				abortWithGoogleError(c, 403, "No active subscription found for this group")
+				status, _, message := subscriptionLookupFailure(err)
+				abortWithGoogleError(c, status, message)
 				return
 			}
 
@@ -188,20 +189,16 @@ func APIKeyAuthWithSubscriptionGoogle(apiKeyService *service.APIKeyService, subs
 			if needsMaintenance {
 				refreshed, maintenanceErr := subscriptionService.EnsureWindowMaintenance(c.Request.Context(), subscription)
 				if maintenanceErr != nil {
-					abortWithGoogleError(c, 500, "Failed to maintain subscription usage windows")
+					status, _, message := subscriptionMaintenanceFailure(maintenanceErr)
+					abortWithGoogleError(c, status, message)
 					return
 				}
 				subscription = refreshed
 				_, err = subscriptionService.ValidateAndCheckLimits(subscription, apiKey.Group)
 			}
 			if err != nil {
-				status := 403
-				if errors.Is(err, service.ErrDailyLimitExceeded) ||
-					errors.Is(err, service.ErrWeeklyLimitExceeded) ||
-					errors.Is(err, service.ErrMonthlyLimitExceeded) {
-					status = 429
-				}
-				abortWithGoogleError(c, status, err.Error())
+				status, _, message := subscriptionValidationFailure(err)
+				abortWithGoogleError(c, status, message)
 				return
 			}
 

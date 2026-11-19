@@ -79,7 +79,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 	bindRequestedReasoningEffort(c, body, reqModel)
 	ensureCompositeTargetPlatform(c, apiKey, reqModel)
 	if !compositeTargetPlatformResolved(c, apiKey, reqModel) {
-		h.responsesErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Model is not supported by composite groups")
+		h.responsesErrorResponse(c, http.StatusNotFound, "model_not_found", "Model is not supported by composite groups")
 		return
 	}
 	if rejectSystemOneOnlyPlatform(c, apiKey, h.responsesErrorResponse) {
@@ -118,7 +118,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		return
 	}
 	if geminiImageGenerationRejected(c, apiKey, nil, reqModel, channelMapping.MappedModel) {
-		h.responsesErrorResponse(c, http.StatusBadRequest, "invalid_request_error", service.ImageGenerationPermissionMessage())
+		h.responsesErrorResponse(c, http.StatusForbidden, "permission_error", service.ImageGenerationPermissionMessage())
 		return
 	}
 
@@ -202,11 +202,16 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				if !cls.ModelNotFound {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				}
-				message := cls.Message
-				if !cls.ModelNotFound {
-					message = "No available accounts: " + err.Error()
+				code := cls.Code
+				if code == "" {
+					code = cls.ErrType
 				}
-				h.responsesErrorResponse(c, cls.Status, cls.ErrType, message)
+				if streamStarted || c.Writer.Written() {
+					service.MarkOpsStreamFailure(c, cls.ErrType, code, cls.Message, cls.Status)
+					writeResponsesFailedSSE(c, cls.ErrType, cls.Code, cls.Message)
+				} else {
+					h.responsesErrorResponse(c, cls.Status, code, cls.Message)
+				}
 				return
 			}
 			action := fs.HandleSelectionExhausted(requestCtx)
@@ -218,7 +223,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				return
 			default:
 				if fs.LastFailoverErr != nil {
-					h.handleResponsesFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
+					h.handleResponsesFailoverExhausted(c, fs.TerminalError(), streamStarted)
 				} else {
 					h.responsesErrorResponse(c, http.StatusBadGateway, "server_error", "All available accounts exhausted")
 				}
@@ -354,7 +359,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				case FailoverContinue:
 					continue
 				case FailoverExhausted:
-					h.handleResponsesFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
+					h.handleResponsesFailoverExhausted(c, fs.TerminalError(), streamStarted)
 					return
 				case FailoverCanceled:
 					failoverClientGone(c)
@@ -404,7 +409,11 @@ func (h *GatewayHandler) handleResponsesFailoverExhausted(c *gin.Context, lastEr
 		statusCode = lastErr.StatusCode
 	}
 	status, code, message := statusCode, "server_error", "All available accounts exhausted"
-	if lastErr != nil && lastErr.IsCredentialFailure() {
+	business, businessRejected := lastErr.BusinessError()
+	if businessRejected {
+		markUpstreamBusinessError(c, lastErr, business)
+		status, code, message = business.Status, business.Code, business.Message
+	} else if lastErr != nil && lastErr.IsCredentialFailure() {
 		status, message = credentialFailoverClientResponse(lastErr)
 	} else if lastErr != nil && lastErr.IsOpenAICapacityShed() && strings.TrimSpace(lastErr.ClientMessage) != "" {
 		status = lastErr.ClientStatusCode
@@ -415,15 +424,19 @@ func (h *GatewayHandler) handleResponsesFailoverExhausted(c *gin.Context, lastEr
 	} else if lastErr != nil && service.IsOpenAISilentRefusalErrorBody(lastErr.ResponseBody) {
 		service.SetOpsUpstreamError(c, statusCode, service.OpenAISilentRefusalClientMessage(), "")
 		status, code, message = http.StatusBadGateway, "upstream_error", service.OpenAISilentRefusalClientMessage()
-	} else if lastErr != nil && statusCode == http.StatusTooManyRequests {
-		status, code, message = http.StatusTooManyRequests, "rate_limit_error", "All available accounts are currently rate-limited. Please retry later."
+	} else if statusCode == http.StatusUnauthorized || statusCode == http.StatusPaymentRequired || statusCode == http.StatusForbidden || statusCode == http.StatusNotFound {
+		status = http.StatusBadGateway
 	}
-	if streamStarted {
+	if streamStarted || c.Writer.Written() {
 		// A slot-wait heartbeat commits HTTP 200 before any upstream response.
 		// In that case a terminal frame is still required; once any semantic or
 		// official terminal bytes exist, preserve them without appending a second
 		// generic response.failed.
-		service.MarkOpsStreamError(c, code, message, status)
+		if businessRejected {
+			service.MarkOpsStreamFailure(c, business.Type, code, message, status)
+		} else {
+			service.MarkOpsStreamError(c, code, message, status)
+		}
 		if c != nil && c.Writer != nil && (c.Writer.Size() <= 0 || gatewayStreamHasOnlyHeartbeats(c)) {
 			writeResponsesFailedSSE(c, code, "", message)
 		}

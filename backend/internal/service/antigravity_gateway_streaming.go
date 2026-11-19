@@ -739,6 +739,8 @@ func (s *AntigravityGatewayService) writeGoogleError(c *gin.Context, status int,
 	switch status {
 	case 400:
 		statusStr = "INVALID_ARGUMENT"
+	case http.StatusForbidden:
+		statusStr = "PERMISSION_DENIED"
 	case 404:
 		statusStr = "NOT_FOUND"
 	case 429:

@@ -81,7 +81,7 @@ func imageDisabledGroup() *Group {
 
 func requireGeminiImagePermissionError(t *testing.T, rec *httptest.ResponseRecorder, wantGoogleStatus string) {
 	t.Helper()
-	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Equal(t, http.StatusForbidden, rec.Code)
 	var payload map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
 	errObj, ok := payload["error"].(map[string]any)
@@ -90,7 +90,7 @@ func requireGeminiImagePermissionError(t *testing.T, rec *httptest.ResponseRecor
 	if wantGoogleStatus != "" {
 		require.Equal(t, wantGoogleStatus, errObj["status"])
 	} else {
-		require.Equal(t, "invalid_request_error", errObj["type"])
+		require.Equal(t, "permission_error", errObj["type"])
 	}
 }
 
@@ -123,7 +123,7 @@ func TestGeminiForwardNative_ImageGenerationDisabledGroupRejectsBeforeUpstream(t
 			require.Error(t, err)
 			require.Nil(t, result)
 			require.Zero(t, httpStub.calls)
-			requireGeminiImagePermissionError(t, rec, "INVALID_ARGUMENT")
+			requireGeminiImagePermissionError(t, rec, "PERMISSION_DENIED")
 		})
 	}
 }
@@ -151,7 +151,7 @@ func TestGeminiForwardNative_ImageGenerationGateAllowsPermittedRequests(t *testi
 
 			_, _ = svc.ForwardNative(context.Background(), c, geminiVertexAPIKeyTestAccount(""), tc.model, tc.action, false, body)
 			require.Equal(t, 1, httpStub.calls)
-			require.NotEqual(t, http.StatusBadRequest, rec.Code)
+			require.NotEqual(t, http.StatusForbidden, rec.Code)
 		})
 	}
 }
@@ -214,7 +214,7 @@ func TestAntigravityForwards_ImageGenerationGate(t *testing.T) {
 			name:             "ForwardGemini",
 			path:             "/v1beta/models/gemini-3-pro-image:streamGenerateContent",
 			body:             geminiBody,
-			wantGoogleStatus: "INVALID_ARGUMENT",
+			wantGoogleStatus: "PERMISSION_DENIED",
 			forward: func(svc *AntigravityGatewayService, c *gin.Context, account *Account) (*ForwardResult, error) {
 				return svc.ForwardGemini(context.Background(), c, account, "gemini-3-pro-image", "streamGenerateContent", true, geminiBody, false)
 			},
@@ -257,7 +257,7 @@ func TestAntigravityForwards_ImageGenerationGate(t *testing.T) {
 
 			_, _ = fw.forward(svc, c, newAntigravityImageGateAccount())
 			require.Equal(t, 1, upstream.callCount)
-			require.NotEqual(t, http.StatusBadRequest, rec.Code)
+			require.NotEqual(t, http.StatusForbidden, rec.Code)
 		})
 	}
 }

@@ -29,7 +29,7 @@ func GeminiImageGenerationDenied(group *Group, geminiBody []byte, models ...stri
 
 // geminiImageGenerationDenied 是转发层在账号模型映射之后的门禁：models 传入
 // 转发时可见的模型名（入参模型名与账号映射后的上游模型名）。命中时把请求标记为
-// 本地功能门禁，调用方负责按各自协议写出 400。
+// 本地功能门禁，调用方负责按各自协议写出 403。
 func geminiImageGenerationDenied(c *gin.Context, geminiBody []byte, models ...string) bool {
 	if c == nil || !GeminiImageGenerationDenied(apiKeyGroup(getAPIKeyFromContext(c)), geminiBody, models...) {
 		return false

@@ -675,33 +675,36 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		)
 	}
 
-	if status, errType, errMsg, matched := applyErrorPassthroughRule(
-		c,
-		PlatformOpenAI,
-		resp.StatusCode,
-		body,
-		http.StatusBadGateway,
-		"upstream_error",
-		"Upstream request failed",
-	); matched {
-		MarkResponseCommitted(c)
-		c.JSON(status, gin.H{
-			"error": gin.H{
-				"type":    errType,
-				"message": errMsg,
-			},
-		})
-		if upstreamMsg == "" {
-			upstreamMsg = errMsg
+	business, businessRejected := ClassifyUpstreamBusinessError(resp.StatusCode, body)
+	if !businessRejected {
+		if status, errType, errMsg, matched := applyErrorPassthroughRule(
+			c,
+			PlatformOpenAI,
+			resp.StatusCode,
+			body,
+			http.StatusBadGateway,
+			"upstream_error",
+			"Upstream request failed",
+		); matched {
+			MarkResponseCommitted(c)
+			c.JSON(status, gin.H{
+				"error": gin.H{
+					"type":    errType,
+					"message": errMsg,
+				},
+			})
+			if upstreamMsg == "" {
+				upstreamMsg = errMsg
+			}
+			if upstreamMsg == "" {
+				return nil, fmt.Errorf("upstream error: %d (passthrough rule matched)", resp.StatusCode)
+			}
+			return nil, fmt.Errorf("upstream error: %d (passthrough rule matched) message=%s", resp.StatusCode, upstreamMsg)
 		}
-		if upstreamMsg == "" {
-			return nil, fmt.Errorf("upstream error: %d (passthrough rule matched)", resp.StatusCode)
-		}
-		return nil, fmt.Errorf("upstream error: %d (passthrough rule matched) message=%s", resp.StatusCode, upstreamMsg)
 	}
 
 	// Check custom error codes
-	if !account.ShouldHandleErrorCode(resp.StatusCode) {
+	if !businessRejected && !account.ShouldHandleErrorCode(resp.StatusCode) {
 		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 			ProxyID:            opsUpstreamProxyID(account),
 			ProxyName:          opsUpstreamProxyName(account),
@@ -757,11 +760,16 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		return nil, &UpstreamFailoverError{
 			StatusCode:             resp.StatusCode,
 			ResponseBody:           body,
+			ResponseHeaders:        resp.Header.Clone(),
 			RetryableOnSameAccount: false,
 		}
 	}
 
 	MarkResponseCommitted(c)
+	if businessRejected {
+		writeOpenAIBusinessError(c, business, resp.Header)
+		return nil, fmt.Errorf("upstream error: %d (%s)", resp.StatusCode, business.Code)
+	}
 
 	// 上游 400 是确定性的请求错误：同一份请求体换账号、重试多少次都会失败。归一成
 	// 502 upstream_error 会让下游网关把它当成可重试的上游故障反复重放（#5479 实测
@@ -889,25 +897,28 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 	}
 	setOpsUpstreamError(c, resp.StatusCode, upstreamMsg, upstreamDetail)
 
-	// Apply error passthrough rules
-	if status, errType, errMsg, matched := applyErrorPassthroughRule(
-		c, account.Platform, resp.StatusCode, body,
-		http.StatusBadGateway, "api_error", "Upstream request failed",
-	); matched {
-		MarkResponseCommitted(c)
-		writeError(c, status, errType, errMsg)
-		if upstreamMsg == "" {
-			upstreamMsg = errMsg
+	business, businessRejected := ClassifyUpstreamBusinessError(resp.StatusCode, body)
+	if !businessRejected {
+		// Apply error passthrough rules
+		if status, errType, errMsg, matched := applyErrorPassthroughRule(
+			c, account.Platform, resp.StatusCode, body,
+			http.StatusBadGateway, "api_error", "Upstream request failed",
+		); matched {
+			MarkResponseCommitted(c)
+			writeError(c, status, errType, errMsg)
+			if upstreamMsg == "" {
+				upstreamMsg = errMsg
+			}
+			if upstreamMsg == "" {
+				return nil, fmt.Errorf("upstream error: %d (passthrough rule matched)", resp.StatusCode)
+			}
+			return nil, fmt.Errorf("upstream error: %d (passthrough rule matched) message=%s", resp.StatusCode, upstreamMsg)
 		}
-		if upstreamMsg == "" {
-			return nil, fmt.Errorf("upstream error: %d (passthrough rule matched)", resp.StatusCode)
-		}
-		return nil, fmt.Errorf("upstream error: %d (passthrough rule matched) message=%s", resp.StatusCode, upstreamMsg)
 	}
 
 	// Check custom error codes — if the account does not handle this status,
 	// return a generic error without exposing upstream details.
-	if !account.ShouldHandleErrorCode(resp.StatusCode) {
+	if !businessRejected && !account.ShouldHandleErrorCode(resp.StatusCode) {
 		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 			ProxyID:            opsUpstreamProxyID(account),
 			ProxyName:          opsUpstreamProxyName(account),
@@ -956,11 +967,18 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 		return nil, &UpstreamFailoverError{
 			StatusCode:             resp.StatusCode,
 			ResponseBody:           body,
+			ResponseHeaders:        resp.Header.Clone(),
 			RetryableOnSameAccount: false,
 		}
 	}
 
 	MarkResponseCommitted(c)
+	if businessRejected {
+		MarkUpstreamBusinessError(c, business, resp.Header)
+		SetOpsLocalErrorType(c, business.Type, business.Code)
+		writeError(c, business.Status, business.Type, business.Message)
+		return nil, fmt.Errorf("upstream error: %d (%s)", resp.StatusCode, business.Code)
+	}
 
 	// Map status code to error type and write response
 	errType := "api_error"
@@ -975,6 +993,10 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 		errType = "api_error"
 	}
 
-	writeError(c, resp.StatusCode, errType, upstreamMsg)
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		writeError(c, http.StatusBadGateway, "api_error", "Upstream access is unavailable")
+	} else {
+		writeError(c, resp.StatusCode, errType, upstreamMsg)
+	}
 	return nil, fmt.Errorf("upstream error: %d %s", resp.StatusCode, upstreamMsg)
 }

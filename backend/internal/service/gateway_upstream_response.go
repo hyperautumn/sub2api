@@ -426,7 +426,7 @@ func (s *GatewayService) handleErrorResponse(ctx context.Context, resp *http.Res
 		}
 	}
 	if shouldDisable {
-		return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: body}
+		return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: body, ResponseHeaders: resp.Header.Clone()}
 	}
 
 	MarkResponseCommitted(c)
@@ -441,6 +441,11 @@ func (s *GatewayService) handleErrorResponse(ctx context.Context, resp *http.Res
 			account.Type,
 			truncateForLog(body, s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes),
 		)
+	}
+
+	if business, ok := ClassifyUpstreamBusinessError(resp.StatusCode, body); ok {
+		writeAnthropicBusinessError(c, business, resp.Header)
+		return nil, fmt.Errorf("upstream error: %d (%s)", resp.StatusCode, business.Code)
 	}
 
 	// 非 failover 错误也支持错误透传规则匹配。
@@ -613,6 +618,11 @@ func (s *GatewayService) handleRetryExhaustedError(ctx context.Context, resp *ht
 			account.Type,
 			truncateForLog(respBody, s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes),
 		)
+	}
+
+	if business, ok := ClassifyUpstreamBusinessError(resp.StatusCode, respBody); ok {
+		writeAnthropicBusinessError(c, business, resp.Header)
+		return nil, fmt.Errorf("upstream error: %d (%s)", resp.StatusCode, business.Code)
 	}
 
 	if status, errType, errMsg, matched := applyErrorPassthroughRule(

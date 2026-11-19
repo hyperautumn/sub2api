@@ -422,6 +422,9 @@ var (
 // ErrNoAvailableAccounts 表示没有可用的账号
 var ErrNoAvailableAccounts = errors.New("no available accounts")
 
+// ErrChannelModelRestricted indicates that the group's channel rejects the requested model.
+var ErrChannelModelRestricted = errors.New("channel pricing restriction")
+
 // ErrAccountSelectionRateLimited identifies a selection failure caused by
 // a temporary upstream account or model limit.
 var ErrAccountSelectionRateLimited = errors.New("account selection rate limited")

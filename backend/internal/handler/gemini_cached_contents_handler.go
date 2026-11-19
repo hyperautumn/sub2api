@@ -175,6 +175,12 @@ func (h *GatewayHandler) GeminiCachedContentsCreate(c *gin.Context) {
 				return
 			}
 			reqLog.Info("gemini.cached_content.account_select_exhausted", zap.Error(err))
+			if lastUpstreamErr == nil && (errors.Is(err, service.ErrAccountSelectionRateLimited) ||
+				errors.Is(err, service.ErrChannelModelRestricted) || errors.Is(err, service.ErrClaudeCodeOnly)) {
+				v := classifyNoAccountErrorFromGin(c, nil, apiKey, modelName, modelName, service.PlatformGemini, err)
+				googleErrorWithType(c, v.Status, v.ErrType, v.Code, v.Message)
+				return
+			}
 			break
 		}
 		account := selection.Account

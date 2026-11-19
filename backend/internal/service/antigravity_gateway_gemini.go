@@ -94,10 +94,10 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 	}
 	if mappedModel == "" {
 		MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalFeatureGate)
-		return nil, s.writeGoogleError(c, http.StatusForbidden, fmt.Sprintf("model %s not in whitelist", originalModel))
+		return nil, s.writeGoogleError(c, http.StatusNotFound, fmt.Sprintf("model %s not in whitelist", originalModel))
 	}
 	if geminiImageGenerationDenied(c, body, originalModel, mappedModel) {
-		return nil, s.writeGoogleError(c, http.StatusBadRequest, ImageGenerationPermissionMessage())
+		return nil, s.writeGoogleError(c, http.StatusForbidden, ImageGenerationPermissionMessage())
 	}
 	forwardedModel := mappedModel
 

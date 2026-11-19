@@ -683,9 +683,10 @@ func TestGeminiCachedContentsPatch_UnsettledChargeHoldsKeyQuotaAndBalance(t *tes
 	for _, tc := range []struct {
 		name           string
 		balance, quota float64
+		wantStatus     int
 	}{
-		{name: "api key quota", balance: 1000, quota: 110},
-		{name: "balance", balance: 110},
+		{name: "api key quota", balance: 1000, quota: 110, wantStatus: http.StatusTooManyRequests},
+		{name: "balance", balance: 110, wantStatus: http.StatusForbidden},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newCachedBillingEnv(t, tc.balance, 900)
@@ -698,7 +699,7 @@ func TestGeminiCachedContentsPatch_UnsettledChargeHoldsKeyQuotaAndBalance(t *tes
 			env.upstream.beforePost = func(n int) {
 				if n == 1 {
 					rec := env.patchTTL("def", "86400s")
-					require.NotEqual(t, http.StatusOK, rec.Code, rec.Body.String())
+					require.Equal(t, tc.wantStatus, rec.Code, rec.Body.String())
 				}
 			}
 

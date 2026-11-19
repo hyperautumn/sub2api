@@ -79,7 +79,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	bindRequestedReasoningEffort(c, body, reqModel)
 	ensureCompositeTargetPlatform(c, apiKey, reqModel)
 	if !compositeTargetPlatformResolved(c, apiKey, reqModel) {
-		h.chatCompletionsErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Model is not supported by composite groups")
+		h.chatCompletionsErrorResponse(c, http.StatusNotFound, "model_not_found", "Model is not supported by composite groups")
 		return
 	}
 	if rejectSystemOneOnlyPlatform(c, apiKey, h.chatCompletionsErrorResponse) {
@@ -114,7 +114,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		return
 	}
 	if geminiImageGenerationRejected(c, apiKey, nil, reqModel, channelMapping.MappedModel) {
-		h.chatCompletionsErrorResponse(c, http.StatusBadRequest, "invalid_request_error", service.ImageGenerationPermissionMessage())
+		h.chatCompletionsErrorResponse(c, http.StatusForbidden, "permission_error", service.ImageGenerationPermissionMessage())
 		return
 	}
 
@@ -205,11 +205,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				if !cls.ModelNotFound {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				}
-				message := cls.Message
-				if !cls.ModelNotFound {
-					message = "No available accounts: " + err.Error()
-				}
-				h.chatCompletionsErrorResponse(c, cls.Status, cls.ErrType, message)
+				(&OpenAIGatewayHandler{}).handleStreamingAwareErrorWithCode(c, cls.Status, cls.ErrType, cls.Code, cls.Message, streamStarted, true)
 				return
 			}
 			action := fs.HandleSelectionExhausted(c.Request.Context())
@@ -221,7 +217,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				return
 			default:
 				if fs.LastFailoverErr != nil {
-					h.handleCCFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
+					h.handleCCFailoverExhausted(c, fs.TerminalError(), streamStarted)
 				} else {
 					h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "server_error", "All available accounts exhausted")
 				}
@@ -371,7 +367,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				case FailoverContinue:
 					continue
 				case FailoverExhausted:
-					h.handleCCFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
+					h.handleCCFailoverExhausted(c, fs.TerminalError(), streamStarted)
 					return
 				case FailoverCanceled:
 					failoverClientGone(c)
@@ -413,7 +409,16 @@ func (h *GatewayHandler) chatCompletionsErrorResponse(c *gin.Context, status int
 
 // handleCCFailoverExhausted writes a failover-exhausted error in CC format.
 func (h *GatewayHandler) handleCCFailoverExhausted(c *gin.Context, lastErr *service.UpstreamFailoverError, streamStarted bool) {
-	if streamStarted {
+	if business, ok := lastErr.BusinessError(); ok {
+		markUpstreamBusinessError(c, lastErr, business)
+		if (streamStarted || c.Writer.Written()) && c.Writer.Size() > 0 && !gatewayStreamHasOnlyHeartbeats(c) {
+			service.MarkOpsStreamFailure(c, business.Type, business.Code, business.Message, business.Status)
+			return
+		}
+		(&OpenAIGatewayHandler{}).handleStreamingAwareErrorWithCode(c, business.Status, business.Type, business.Code, business.Message, streamStarted || c.Writer.Written(), true)
+		return
+	}
+	if streamStarted || c.Writer.Written() {
 		return
 	}
 	if lastErr != nil {
@@ -434,7 +439,12 @@ func (h *GatewayHandler) handleCCFailoverExhausted(c *gin.Context, lastErr *serv
 	}
 	statusCode := http.StatusBadGateway
 	if lastErr != nil && lastErr.StatusCode > 0 {
-		statusCode = lastErr.StatusCode
+		switch lastErr.StatusCode {
+		case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden, http.StatusNotFound:
+			// This failure belongs to the gateway's upstream account or endpoint.
+		default:
+			statusCode = lastErr.StatusCode
+		}
 	}
 	if lastErr != nil && service.IsOpenAISilentRefusalErrorBody(lastErr.ResponseBody) {
 		service.SetOpsUpstreamError(c, statusCode, service.OpenAISilentRefusalClientMessage(), "")

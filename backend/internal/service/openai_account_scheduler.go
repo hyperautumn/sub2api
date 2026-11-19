@@ -1381,6 +1381,22 @@ func (s openAISelectionFilterStats) rateLimited() bool {
 	return false
 }
 
+func (s openAISelectionFilterStats) imageBalanceBlocked() bool {
+	if s.reasons[openAIImagesBalanceRateLimitReason] == 0 {
+		return false
+	}
+	for reason := range s.reasons {
+		switch reason {
+		case openAIImagesBalanceRateLimitReason, "excluded", "model_not_supported", "account_model_not_owned",
+			"capability_mismatch", "transport_incompatible", "platform_mismatch":
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // summary renders deterministic exclusion statistics for scheduling error
 // messages, e.g. "pool=3, filtered: model_not_supported=2 quota_auto_pause_7d=1".
 // Reasons are sorted lexicographically so the output is stable for tests and
@@ -1482,6 +1498,10 @@ func (s *defaultOpenAIAccountScheduler) selectByLoadBalance(
 		}
 		if !s.isAccountTransportCompatible(account, req.RequiredTransport) {
 			filterStats.exclude("transport_incompatible")
+			continue
+		}
+		if openAIImageBalanceCoolingDown(ctx, account, req.RequestedModel) {
+			filterStats.exclude(openAIImagesBalanceRateLimitReason)
 			continue
 		}
 		filtered = append(filtered, account)
@@ -2314,7 +2334,7 @@ func (s *OpenAIGatewayService) selectLegacyAccountByPreviousResponse(
 		return nil, false, nil
 	}
 	if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
-		return nil, false, fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel)
+		return nil, false, fmt.Errorf("%w supporting model: %s (%w)", ErrNoAvailableAccounts, requestedModel, ErrChannelModelRestricted)
 	}
 	selection, err := s.selectAccountByPreviousResponseIDForCapability(ctx, groupID, previousResponseID, requestedModel, excludedIDs, requiredCapability, requireCompact)
 	if err != nil {
@@ -2395,7 +2415,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		}
 		if guardianParentAccountID > 0 {
 			if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
-				return nil, decision, fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel)
+				return nil, decision, fmt.Errorf("%w supporting model: %s (%w)", ErrNoAvailableAccounts, requestedModel, ErrChannelModelRestricted)
 			}
 			fallbackScheduler := &defaultOpenAIAccountScheduler{service: s, stats: newOpenAIAccountRuntimeStats()}
 			selection, _, err := fallbackScheduler.selectBySessionHash(ctx, OpenAIAccountScheduleRequest{
@@ -2485,7 +2505,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		slog.Warn("channel pricing restriction blocked request",
 			"group_id", derefGroupID(groupID),
 			"model", requestedModel)
-		return nil, decision, fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel)
+		return nil, decision, fmt.Errorf("%w supporting model: %s (%w)", ErrNoAvailableAccounts, requestedModel, ErrChannelModelRestricted)
 	}
 
 	var stickyAccountID int64

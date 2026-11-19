@@ -62,7 +62,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 	thinkingEnabled := claudeReq.Thinking != nil && (claudeReq.Thinking.Type == "enabled" || claudeReq.Thinking.Type == "adaptive")
 	mappedModel = applyThinkingModelSuffix(mappedModel, thinkingEnabled)
 	if geminiImageGenerationDenied(c, nil, originalModel, mappedModel) {
-		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", ImageGenerationPermissionMessage())
+		return nil, s.writeClaudeError(c, http.StatusForbidden, "permission_error", ImageGenerationPermissionMessage())
 	}
 	billingModel := mappedModel
 

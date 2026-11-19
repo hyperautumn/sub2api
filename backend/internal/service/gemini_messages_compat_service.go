@@ -557,7 +557,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
 	if geminiImageGenerationDenied(c, geminiReq, originalModel, mappedModel) {
-		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", ImageGenerationPermissionMessage())
+		return nil, s.writeClaudeError(c, http.StatusForbidden, "permission_error", ImageGenerationPermissionMessage())
 	}
 	geminiReq = ensureGeminiFunctionCallThoughtSignatures(geminiReq)
 	includeThoughts := req.Stream && claudeRequestEnablesThinking(body)
@@ -1128,7 +1128,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 		mappedModel = account.GetMappedModel(originalModel)
 	}
 	if action != "countTokens" && geminiImageGenerationDenied(c, body, originalModel, mappedModel) {
-		return nil, s.writeGoogleError(c, http.StatusBadRequest, ImageGenerationPermissionMessage())
+		return nil, s.writeGoogleError(c, http.StatusForbidden, ImageGenerationPermissionMessage())
 	}
 
 	proxyURL := ""
@@ -1820,6 +1820,13 @@ func (s *GeminiMessagesCompatService) writeGeminiNativeUpstreamError(c *gin.Cont
 	respBody = unwrapIfNeeded(isOAuth, respBody)
 	upstreamMsg := s.recordGeminiNativeUpstreamError(c, account, resp.StatusCode, respBody, requestID)
 
+	if business, ok := ClassifyUpstreamBusinessError(resp.StatusCode, respBody); ok {
+		MarkUpstreamBusinessError(c, business, resp.Header)
+		SetOpsLocalErrorType(c, business.Type, business.Code)
+		MarkResponseCommitted(c)
+		return s.writeGoogleError(c, business.Status, business.Message)
+	}
+
 	contentType := resp.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = "application/json"
@@ -1923,6 +1930,11 @@ func (s *GeminiMessagesCompatService) writeGeminiMappedError(c *gin.Context, acc
 
 	if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
 		logger.LegacyPrintf("service.gemini_messages_compat", "[Gemini] upstream error %d: %s", upstreamStatus, truncateForLog(body, s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes))
+	}
+
+	if business, ok := ClassifyUpstreamBusinessError(upstreamStatus, body); ok {
+		writeAnthropicBusinessError(c, business, nil)
+		return fmt.Errorf("upstream error: %d (%s)", upstreamStatus, business.Code)
 	}
 
 	if status, errType, errMsg, matched := applyErrorPassthroughRule(

@@ -755,6 +755,28 @@ func TestHandleFailoverError_LastFailoverErr(t *testing.T) {
 	})
 }
 
+func TestFailoverTerminalErrorUsesAllAttemptedAccounts(t *testing.T) {
+	dependency := &service.UpstreamFailoverError{StatusCode: http.StatusBadGateway}
+	quota := &service.UpstreamFailoverError{StatusCode: http.StatusTooManyRequests}
+	balance := &service.UpstreamFailoverError{StatusCode: http.StatusForbidden, ResponseBody: []byte(`{"error":{"code":"AccountOverdueError"}}`)}
+
+	for _, tc := range []struct {
+		first, last, want *service.UpstreamFailoverError
+	}{
+		{dependency, quota, dependency},
+		{quota, dependency, dependency},
+		{balance, quota, quota},
+		{quota, balance, quota},
+	} {
+		state := NewFailoverState(1, false)
+		unscheduler := &mockTempUnscheduler{}
+		state.HandleFailoverError(context.Background(), unscheduler, 1, service.PlatformAnthropic, 0, tc.first)
+		state.HandleFailoverError(context.Background(), unscheduler, 2, service.PlatformAnthropic, 0, tc.last)
+		require.Same(t, tc.last, state.LastFailoverErr)
+		require.Same(t, tc.want, state.TerminalError())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // HandleFailoverError — 综合集成场景
 // ---------------------------------------------------------------------------

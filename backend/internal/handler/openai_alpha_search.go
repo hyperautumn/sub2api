@@ -127,6 +127,7 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
+	var failures gatewayFailoverErrors
 	switchCount := 0
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	routingStart := time.Now()
@@ -161,11 +162,11 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 				if !cls.ModelNotFound {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				}
-				h.errorResponse(c, cls.Status, cls.ErrType, cls.Message)
+				h.handleStreamingAwareErrorWithCode(c, cls.Status, cls.ErrType, cls.Code, cls.Message, false, true)
 				return
 			}
 			if lastFailoverErr != nil {
-				h.handleFailoverExhausted(c, lastFailoverErr, false)
+				h.handleFailoverExhausted(c, failures.terminal(lastFailoverErr), false)
 			} else {
 				h.errorResponse(c, http.StatusBadGateway, "upstream_error", "Upstream request failed")
 			}
@@ -255,13 +256,14 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 		h.gatewayService.RecordOpenAIAccountSwitch()
 		failedAccountIDs[account.ID] = struct{}{}
 		lastFailoverErr = failoverErr
+		failures.record(account.ID, failoverErr)
 		if switchCount >= h.maxAccountSwitches {
-			h.handleFailoverExhausted(c, failoverErr, false)
+			h.handleFailoverExhausted(c, failures.terminal(lastFailoverErr), false)
 			return
 		}
 		switchCount++
 		if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
-			h.handleFailoverExhausted(c, failoverErr, false)
+			h.handleFailoverExhausted(c, failures.terminal(lastFailoverErr), false)
 			return
 		}
 		reqLog.Warn("openai_alpha_search.upstream_failover_switching",

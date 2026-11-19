@@ -86,7 +86,7 @@ func newOpenAIImagesInsufficientBalanceFailoverError(statusCode int, headers htt
 		ResponseHeaders:   headers.Clone(),
 		ResponseBody:      body,
 		Reason:            OpenAIImagesInsufficientBalanceReason,
-		ClientStatusCode:  402,
+		ClientStatusCode:  http.StatusForbidden,
 		ClientMessage:     OpenAIImagesInsufficientBalanceMessage,
 		NextAccountAction: NextAccountRetry,
 	}

@@ -152,7 +152,7 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 				return
 			default:
 				if fs.LastFailoverErr != nil {
-					h.handleFailoverExhausted(c, fs.LastFailoverErr, service.PlatformTypeSafe, false)
+					h.handleFailoverExhausted(c, fs.TerminalError(), service.PlatformTypeSafe, false)
 				} else {
 					h.handleFailoverExhaustedSimple(c, http.StatusBadGateway, false)
 				}
@@ -214,7 +214,7 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 					)
 					continue
 				case FailoverExhausted:
-					h.handleFailoverExhausted(c, fs.LastFailoverErr, service.PlatformTypeSafe, false)
+					h.handleFailoverExhausted(c, fs.TerminalError(), service.PlatformTypeSafe, false)
 					return
 				case FailoverCanceled:
 					failoverClientGone(c)

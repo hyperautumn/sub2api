@@ -22,16 +22,16 @@ func TestOpenAIImagesBalanceExhaustionPreservesMachineReadableCause(t *testing.T
 		(&OpenAIGatewayHandler{}).handleFailoverExhausted(c, &service.UpstreamFailoverError{
 			StatusCode:       http.StatusBadGateway,
 			Reason:           service.OpenAIImagesInsufficientBalanceReason,
-			ClientStatusCode: http.StatusPaymentRequired,
+			ClientStatusCode: http.StatusForbidden,
 			ClientMessage:    service.OpenAIImagesInsufficientBalanceMessage,
 			ResponseHeaders:  http.Header{"Retry-After": []string{"23"}, "X-Request-Id": []string{"req-images-balance"}},
 		}, streamStarted)
-		require.Equal(t, "23", recorder.Header().Get("Retry-After"))
+		require.Empty(t, recorder.Header().Get("Retry-After"))
 
 		if streamStarted {
 			require.Contains(t, recorder.Body.String(), `"code":"insufficient_balance"`)
 		} else {
-			require.Equal(t, http.StatusPaymentRequired, recorder.Code)
+			require.Equal(t, http.StatusForbidden, recorder.Code)
 			require.Equal(t, service.OpenAIImagesInsufficientBalanceCode, gjson.GetBytes(recorder.Body.Bytes(), "error.code").String())
 		}
 	}

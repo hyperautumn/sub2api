@@ -219,6 +219,25 @@ func (a *Account) modelRateLimitReason(scope string) string {
 	return reason
 }
 
+// openAIImageBalanceCoolingDown recognizes the persisted image-wallet cooldown
+// only when the request uses that scope and no other model cooldown applies.
+func openAIImageBalanceCoolingDown(ctx context.Context, account *Account, requestedModel string) bool {
+	if account == nil || !account.IsOpenAI() || account.modelRateLimitReason(openAIImageGenerationRateLimitKey) != openAIImagesBalanceRateLimitReason {
+		return false
+	}
+	imageBalanceBlocked := false
+	for _, key := range account.modelRateLimitKeysForRequest(ctx, requestedModel) {
+		if account.getRateLimitRemainingForKey(key) <= 0 {
+			continue
+		}
+		if key != openAIImageGenerationRateLimitKey {
+			return false
+		}
+		imageBalanceBlocked = true
+	}
+	return imageBalanceBlocked
+}
+
 // setAccountModelRateLimitSnapshot 把模型级限流写进本账号对象的 Extra 快照。
 // 写时复制：Extra 与其中的 model_rate_limits 可能与调度快照母本及其它副本共享，
 // 这里只读取旧 map，写入新复制的 map 后替换 account.Extra，不修改任何已有 map。
